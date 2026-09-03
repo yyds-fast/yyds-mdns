@@ -159,6 +159,9 @@ yyds-mdns scan
 # Resolve a specific service
 yyds-mdns resolve my-api
 
+# Resolve and open directly in default browser
+yyds-mdns open my-api
+
 # Show detected LAN IP
 yyds-mdns ip
 ```
@@ -169,13 +172,14 @@ yyds-mdns ip
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `name` | `str` | *required* | Domain/service prefix, e.g. `"my-api"` -> `my-api.local` |
-| `port` | `int` | *required* | Service listening port (1 - 65535) |
+| `name` | `str` | `None` (auto-inferred) | Domain/service prefix, inferred from `app.title`, `app.name`, or filename |
+| `port` | `int` | `None` (auto-inferred) | Service port, resolved from `PORT` env or framework defaults (Flask 5000, ASGI 8000) |
 | `ip` | `str` | `None` (auto-detect) | Explicit IPv4 address override |
 | `interface` | `str` | `None` (smart choice) | Explicit network interface binding (e.g. `"eno1"`, `"eth0"`) |
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD service type, e.g. `"_https._tcp.local."` |
 | `properties` | `dict` | `None` | Key-value pairs stored in DNS TXT record |
 | `use_worker_lock`| `bool` | `True` | Prevents multi-worker broadcast collision |
+| `verbose` | `bool` | `True` | Whether to print startup banner and shutdown notice to terminal |
 
 ---
 

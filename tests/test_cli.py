@@ -50,6 +50,12 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(args.command, "resolve")
         self.assertEqual(args.name, "printer.local")
 
+    def test_open_args(self):
+        args = self.parser.parse_args(["open", "my-service", "--timeout", "3.0"])
+        self.assertEqual(args.command, "open")
+        self.assertEqual(args.name, "my-service")
+        self.assertEqual(args.timeout, 3.0)
+
     def test_ip_args(self):
         args = self.parser.parse_args(["ip"])
         self.assertEqual(args.command, "ip")

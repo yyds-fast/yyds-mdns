@@ -53,6 +53,12 @@ class TestNetUtils(unittest.TestCase):
         self.assertEqual(score_adapter_ip("docker0", "172.17.0.1"), -500)
         # eno1 has physical prefix (+500) + 192.168 (+1000) = 1500
         self.assertEqual(score_adapter_ip("eno1", "192.168.20.10"), 1500)
+        # Wi-Fi on Linux / macOS / Windows
+        self.assertEqual(score_adapter_ip("wlan0", "192.168.1.50"), 1500)
+        self.assertEqual(score_adapter_ip("wlp2s0", "192.168.31.102"), 1500)
+        self.assertEqual(score_adapter_ip("Wi-Fi", "192.168.1.88"), 1500)
+        self.assertEqual(score_adapter_ip("无线网络连接", "192.168.0.105"), 1500)
+        self.assertEqual(score_adapter_ip("WLAN", "192.168.10.15"), 1500)
 
     def test_get_lan_ip_explicit(self):
         ip = get_lan_ip(preferred_ip="192.168.31.200")

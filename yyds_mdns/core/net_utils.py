@@ -43,13 +43,22 @@ IGNORED_IFACE_PATTERNS = (
     "calico",
 )
 
-# Common physical LAN/WiFi interface prefixes across Linux/macOS/Windows
-PHYSICAL_IFACE_PREFIXES = (
+# Common physical LAN/WiFi interface patterns across Linux/macOS/Windows
+PHYSICAL_IFACE_PATTERNS = (
+    # Linux Ethernet & Wireless
     "eth",
     "en",
-    "wl",
+    "wl",  # matches wlan0, wlp2s0, wls1, wlo1, wlx...
     "wifi",
+    "wi-fi",
+    "wireless",
+    # Windows adapters (English & Chinese system locales)
     "wlan",
+    "local area connection",
+    "ethernet",
+    "以太网",
+    "无线",
+    "802.11",
 )
 
 
@@ -122,8 +131,8 @@ def score_adapter_ip(adapter_name: str, ip: str) -> int:
     else:
         score += 200
 
-    # Physical interface bonus (eno1, enp3s0, eth0, wlan0, etc.)
-    if any(name_low.startswith(p) for p in PHYSICAL_IFACE_PREFIXES):
+    # Physical interface bonus (eno1, eth0, wlan0, wlp2s0, Wi-Fi, WLAN, 无线网络连接, etc.)
+    if any(p in name_low for p in PHYSICAL_IFACE_PATTERNS):
         score += 500
 
     return score

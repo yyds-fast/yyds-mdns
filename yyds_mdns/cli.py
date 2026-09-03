@@ -127,6 +127,20 @@ def _cmd_ip(args: argparse.Namespace) -> None:
     print()
 
 
+def _cmd_open(args: argparse.Namespace) -> None:
+    import webbrowser
+
+    print(f"\n🔍 正在局域网解析服务: {args.name} ...")
+    service = MDNSResolver.resolve(args.name, protocol=args.type, timeout=args.timeout)
+    if service:
+        print(f"✅ 找到服务: {service.url}/  (IP: {service.ip}:{service.port})")
+        print(f"🌐 正在默认浏览器中打开: {service.url}/\n")
+        webbrowser.open(service.url)
+    else:
+        print(f"❌ 未在局域网中发现活跃服务: {args.name}\n")
+        sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="yyds-mdns",
@@ -177,6 +191,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=2.5, help="Resolution timeout in seconds"
     )
 
+    # Command: open
+    open_parser = subparsers.add_parser(
+        "open", help="Resolve a .local service and open in browser"
+    )
+    open_parser.add_argument("name", help="Service name (e.g. 'uo-yskj')")
+    open_parser.add_argument(
+        "--type", "-t", default="_http._tcp.local.", help="DNS-SD service type"
+    )
+    open_parser.add_argument(
+        "--timeout", type=float, default=2.5, help="Resolution timeout in seconds"
+    )
+
     # Command: ip
     subparsers.add_parser("ip", help="Show detected LAN IP information")
 
@@ -196,6 +222,8 @@ def main() -> None:
         _cmd_scan(args)
     elif args.command == "resolve":
         _cmd_resolve(args)
+    elif args.command == "open":
+        _cmd_open(args)
     elif args.command == "ip":
         _cmd_ip(args)
     else:

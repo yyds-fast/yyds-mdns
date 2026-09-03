@@ -226,12 +226,31 @@ class TestProtocols(unittest.TestCase):
 
         asyncio.run(run_async_unified())
 
-        # 6. Function Decorator
-        @MDNS(name="u-deco", port=9002, ip="127.0.0.1", use_worker_lock=False)
+        # 6. Function Decorator (with params)
+        @MDNS(
+            name="u-deco",
+            port=9002,
+            ip="127.0.0.1",
+            use_worker_lock=False,
+            verbose=False,
+        )
         def sample_worker():
             return 42
 
         self.assertEqual(sample_worker(), 42)
+
+        # 7. Bare Decorator (without params)
+        @MDNS
+        def sample_bare_sync():
+            return 100
+
+        self.assertEqual(sample_bare_sync(), 100)
+
+        @MDNS
+        async def sample_bare_async():
+            return 200
+
+        self.assertEqual(asyncio.run(sample_bare_async()), 200)
 
 
 if __name__ == "__main__":

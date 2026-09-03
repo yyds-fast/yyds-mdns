@@ -161,7 +161,10 @@ yyds-mdns scan
 # 3. 快速解析域名
 yyds-mdns resolve my-api
 
-# 4. 查看当前被智能选中的局域网 IP
+# 4. 解析并在系统默认浏览器中一键打开
+yyds-mdns open my-api
+
+# 5. 查看当前被智能选中的局域网 IP
 yyds-mdns ip
 ```
 
@@ -173,13 +176,14 @@ yyds-mdns ip
 
 | 参数名 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `name` | `str` | *必填* | 域名/服务前缀，如 `"my-api"` 映射为 `my-api.local` |
-| `port` | `int` | *必填* | 服务对外端口（1 - 65535） |
+| `name` | `str` | `None` (智能推导) | 域名/服务前缀，省略时自动根据 `app.title`、`app.name` 或运行脚本名推导 |
+| `port` | `int` | `None` (智能推导) | 服务对外端口，省略时自动从 `PORT` 环境变量读取或框架默认（Flask 5000, ASGI 8000） |
 | `ip` | `str` | `None` (自动探测) | 手动指定广播的 IPv4 地址 |
 | `interface` | `str` | `None` (智能优选) | 手动指定绑定的物理网卡名（如 `"eno1"`、`"eth0"`） |
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD 服务类型，如 `"_https._tcp.local."` |
 | `properties` | `dict` | `None` | 附加在 TXT 记录中的元数据字典 |
 | `use_worker_lock`| `bool` | `True` | 是否启用多 Worker 进程互斥锁，避免冲突 |
+| `verbose` | `bool` | `True` | 是否在终端输出高亮访问域名提示与注销通知 |
 
 ---
 
