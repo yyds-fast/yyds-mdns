@@ -55,6 +55,39 @@ class TestMDNSEngine(unittest.TestCase):
 
         asyncio.run(run_async())
 
+    def test_print_banner_and_goodbye_limited_encoding(self):
+        import sys
+        from yyds_mdns.core.engine import print_banner, print_goodbye
+
+        class LimitedEncodingStream:
+            encoding = "cp1252"
+
+            def __init__(self):
+                self.output = []
+
+            def write(self, s):
+                s.encode("cp1252")
+                self.output.append(s)
+
+            def flush(self):
+                pass
+
+            def isatty(self):
+                return False
+
+        orig_stdout = sys.stdout
+        s = LimitedEncodingStream()
+        sys.stdout = s
+        try:
+            print_banner("http://test.local:8000", "127.0.0.1")
+            print_goodbye("http://test.local:8000")
+        finally:
+            sys.stdout = orig_stdout
+
+        output_str = "".join(s.output)
+        self.assertIn("http://test.local:8000/", output_str)
+        self.assertIn("127.0.0.1", output_str)
+
 
 if __name__ == "__main__":
     unittest.main()

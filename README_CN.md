@@ -58,9 +58,11 @@ app = FastAPI()
 # 一行代码挂载：启动后局域网设备直接访问 http://my-api.local:8000
 MDNS(app, name="my-api", port=8000)
 
+
 @app.get("/")
 def read_root():
     return {"message": "Hello from mDNS!"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
@@ -81,9 +83,11 @@ app = Flask(__name__)
 # 初始化 Flask：局域网设备直接访问 http://flask-app.local:5000
 MDNS(app, name="flask-app", port=5000)
 
+
 @app.route("/")
 def index():
     return "Hello Flask from mDNS!"
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
@@ -120,6 +124,7 @@ with MDNS(name="my-tcp-node", port=9090) as server:
 # 方式 2：异步上下文管理器
 async with MDNS(name="async-service", port=8080):
     await run_async_server()
+
 
 # 方式 3：函数/协程装饰器
 @MDNS(name="decorated-job", port=8888)

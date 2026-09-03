@@ -58,9 +58,11 @@ app = FastAPI()
 # One line to register: Accessible at http://my-api.local:8000
 MDNS(app, name="my-api", port=8000)
 
+
 @app.get("/")
 def read_root():
     return {"message": "Hello from mDNS!"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
@@ -79,9 +81,11 @@ app = Flask(__name__)
 # Register Flask service: Accessible at http://flask-app.local:5000
 MDNS(app, name="flask-app", port=5000)
 
+
 @app.route("/")
 def index():
     return "Hello Flask from mDNS!"
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
@@ -118,6 +122,7 @@ with MDNS(name="custom-node", port=9090) as server:
 # Asynchronous context manager
 async with MDNS(name="async-service", port=8080):
     await run_async_server()
+
 
 # Function decorator
 @MDNS(name="my-job", port=8888)

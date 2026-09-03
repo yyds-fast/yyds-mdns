@@ -21,26 +21,62 @@ from yyds_mdns.core.service import MDNSServiceConfig
 logger = logging.getLogger("yyds_mdns")
 
 
+def _safe_print(text: str, fallback: Optional[str] = None) -> None:
+    """Safely print text to terminal, gracefully handling limited encodings (e.g. Windows cp1252/cp437)."""
+    try:
+        print(text, flush=True)
+    except (UnicodeEncodeError, UnicodeError):
+        try:
+            if fallback is not None:
+                print(fallback, flush=True)
+            else:
+                encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+                print(
+                    text.encode(encoding, errors="replace").decode(encoding),
+                    flush=True,
+                )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def print_banner(url: str, ip: str) -> None:
     """Print visually pleasant service startup banner to terminal."""
-    if sys.stdout.isatty():
-        print(
-            f"\033[36m🌐 局域网 mDNS .local 访问域名: \033[1;32m{url}/\033[0m  \033[90m(IP: {ip})\033[0m",
-            flush=True,
-        )
-    else:
-        print(f"🌐 局域网 mDNS .local 访问域名: {url}/  (IP: {ip})", flush=True)
+    try:
+        is_atty = False
+        try:
+            is_atty = sys.stdout.isatty()
+        except Exception:
+            pass
+
+        if is_atty:
+            text = f"\033[36m🌐 局域网 mDNS .local 访问域名: \033[1;32m{url}/\033[0m  \033[90m(IP: {ip})\033[0m"
+        else:
+            text = f"🌐 局域网 mDNS .local 访问域名: {url}/  (IP: {ip})"
+        _safe_print(text, fallback=f"[mDNS] LAN Domain: {url}/  (IP: {ip})")
+    except Exception:
+        pass
 
 
 def print_goodbye(url: str) -> None:
     """Print service deregistration notice to terminal."""
-    if sys.stdout.isatty():
-        print(
-            f"\033[33m👋 局域网 mDNS 服务已注销 (Goodbye广播已发送): \033[0m\033[90m{url}/\033[0m",
-            flush=True,
+    try:
+        is_atty = False
+        try:
+            is_atty = sys.stdout.isatty()
+        except Exception:
+            pass
+
+        if is_atty:
+            text = f"\033[33m👋 局域网 mDNS 服务已注销 (Goodbye广播已发送): \033[0m\033[90m{url}/\033[0m"
+        else:
+            text = f"👋 局域网 mDNS 服务已注销 (Goodbye广播已发送): {url}/"
+        _safe_print(
+            text, fallback=f"[mDNS] Service unregistered (Goodbye sent): {url}/"
         )
-    else:
-        print(f"👋 局域网 mDNS 服务已注销 (Goodbye广播已发送): {url}/", flush=True)
+    except Exception:
+        pass
 
 
 class MDNSEngine:
@@ -100,7 +136,10 @@ class MDNSEngine:
                 "mDNS service registered: %s (%s)", self.config.url, self.config.ip
             )
             if self.verbose:
-                print_banner(self.config.url, self.config.ip)
+                try:
+                    print_banner(self.config.url, self.config.ip)
+                except Exception:
+                    pass
             return True
         except NonUniqueNameException as err:
             self.stop()
@@ -123,7 +162,10 @@ class MDNSEngine:
                     )
                     self._zeroconf.unregister_service(self._service_info)
                     if self.verbose:
-                        print_goodbye(self.config.url)
+                        try:
+                            print_goodbye(self.config.url)
+                        except Exception:
+                            pass
                 except Exception as err:
                     logger.warning("Error unregistering mDNS service: %s", err)
             try:
@@ -212,7 +254,10 @@ class AsyncMDNSEngine:
                 self.config.ip,
             )
             if self.verbose:
-                print_banner(self.config.url, self.config.ip)
+                try:
+                    print_banner(self.config.url, self.config.ip)
+                except Exception:
+                    pass
             return True
         except NonUniqueNameException as err:
             await self.stop()
@@ -237,7 +282,10 @@ class AsyncMDNSEngine:
                         self._service_info
                     )
                     if self.verbose:
-                        print_goodbye(self.config.url)
+                        try:
+                            print_goodbye(self.config.url)
+                        except Exception:
+                            pass
                 except Exception as err:
                     logger.warning("Error unregistering async mDNS service: %s", err)
             try:
