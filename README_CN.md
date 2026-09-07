@@ -160,16 +160,19 @@ if res:
 # 1. 广播本地端口（如 Ollama 或本地 Web 站点）
 yyds-mdns run --name my-ollama --port 11434
 
-# 2. 扫描局域网 mDNS 服务
+# 2. 多设备/集群防冲突（自动追加硬件 MAC 地址末尾指纹，如 my-ollama-e6d3.local）
+yyds-mdns run --name my-ollama --port 11434 --unique
+
+# 3. 扫描局域网 mDNS 服务
 yyds-mdns scan
 
-# 3. 快速解析域名
+# 4. 快速解析域名
 yyds-mdns resolve my-api
 
-# 4. 解析并在系统默认浏览器中一键打开
+# 5. 解析并在系统默认浏览器中一键打开
 yyds-mdns open my-api
 
-# 5. 查看当前被智能选中的局域网 IP
+# 6. 查看当前被智能选中的局域网 IP
 yyds-mdns ip
 ```
 
@@ -181,8 +184,9 @@ yyds-mdns ip
 
 | 参数名 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `name` | `str` | `None` (智能推导) | 域名/服务前缀，省略时自动根据 `app.title`、`app.name` 或运行脚本名推导 |
+| `name` | `str` | `None` (智能推导) | 域名/服务前缀，省略时自动根据 `app.title`、`app.name` 或运行脚本名推导。支持 `{mac}` 占位符（如 `"node-{mac}"`） |
 | `port` | `int` | `None` (智能推导) | 服务对外端口，省略时自动从 `PORT` 环境变量读取或框架默认（Flask 5000, ASGI 8000） |
+| `unique` | `bool` | `False` | 局域网多设备防冲突开关，开启后自动追加网卡 MAC 地址后 4 位（如 `my-app-e6d3.local`）并注入 `device_id` 到 TXT 记录 |
 | `ip` | `str` | `None` (自动探测) | 手动指定广播的 IPv4 地址 |
 | `interface` | `str` | `None` (智能优选) | 手动指定绑定的物理网卡名（如 `"eno1"`、`"eth0"`） |
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD 服务类型，如 `"_https._tcp.local."` |

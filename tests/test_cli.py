@@ -16,6 +16,14 @@ class TestCLI(unittest.TestCase):
         self.assertIsNone(args.ip)
         self.assertIsNone(args.interface)
         self.assertEqual(args.type, "_http._tcp.local.")
+        self.assertFalse(args.unique)
+
+    def test_run_args_unique(self):
+        args1 = self.parser.parse_args(["run", "-n", "app", "-p", "8000", "--unique"])
+        self.assertTrue(args1.unique)
+
+        args2 = self.parser.parse_args(["run", "-n", "app", "-p", "8000", "-u"])
+        self.assertTrue(args2.unique)
 
     def test_run_args_with_custom_ip_and_type(self):
         args = self.parser.parse_args(

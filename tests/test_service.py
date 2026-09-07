@@ -64,6 +64,29 @@ class TestService(unittest.TestCase):
         self.assertEqual(config.host_name, "custom-node.local")
         self.assertEqual(config.server, "custom-node.local.")
 
+    def test_service_config_unique(self):
+        config = MDNSServiceConfig(
+            name="worker",
+            port=8000,
+            ip="127.0.0.1",
+            unique=True,
+        )
+        self.assertTrue(len(config.device_suffix) == 4)
+        self.assertEqual(config.name, f"worker-{config.device_suffix}")
+        self.assertEqual(config.host_name, f"worker-{config.device_suffix}.local")
+        self.assertEqual(config.properties.get("device_id"), config.device_suffix)
+
+    def test_service_config_template_placeholder(self):
+        config = MDNSServiceConfig(
+            name="cluster-node-{mac}",
+            port=9000,
+            ip="127.0.0.1",
+        )
+        self.assertTrue(len(config.device_suffix) == 4)
+        self.assertEqual(config.name, f"cluster-node-{config.device_suffix}")
+        self.assertEqual(config.host_name, f"cluster-node-{config.device_suffix}.local")
+        self.assertEqual(config.properties.get("device_id"), config.device_suffix)
+
 
 if __name__ == "__main__":
     unittest.main()

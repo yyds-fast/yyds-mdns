@@ -37,6 +37,7 @@ class ASGIMDNS:
         server: Optional[str] = None,
         use_worker_lock: bool = True,
         verbose: bool = True,
+        unique: bool = False,
         **kwargs: Any,
     ):
         self.app = app
@@ -49,6 +50,8 @@ class ASGIMDNS:
             protocol=protocol,
             properties=properties,
             server=server,
+            unique=unique,
+            **kwargs,
         )
         self.use_worker_lock = use_worker_lock
         self.engine = AsyncMDNSEngine(

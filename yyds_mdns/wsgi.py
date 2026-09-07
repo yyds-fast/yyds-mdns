@@ -38,6 +38,7 @@ class WSGIMDNS:
         use_worker_lock: bool = True,
         auto_start: bool = True,
         verbose: bool = True,
+        unique: bool = False,
         **kwargs: Any,
     ):
         self.app = app
@@ -50,6 +51,8 @@ class WSGIMDNS:
             protocol=protocol,
             properties=properties,
             server=server,
+            unique=unique,
+            **kwargs,
         )
         self.use_worker_lock = use_worker_lock
         self.auto_start = auto_start

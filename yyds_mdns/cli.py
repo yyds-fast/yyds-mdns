@@ -27,6 +27,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         ip=args.ip,
         interface=args.interface,
         protocol=args.type,
+        unique=getattr(args, "unique", False),
     )
     engine = MDNSEngine(config, use_worker_lock=False)
 
@@ -35,6 +36,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
     print("=" * 55)
     print(f"  • Service Name : {config.name}")
     print(f"  • Local Domain : {config.host_name}")
+    if config.device_suffix:
+        print(f"  • Device Suffix: {config.device_suffix}")
     print(f"  • LAN IP       : {config.ip}")
     if config.interface:
         print(f"  • Interface    : {config.interface}")
@@ -171,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--type", "-t", default="_http._tcp.local.", help="DNS-SD service type"
+    )
+    run_parser.add_argument(
+        "--unique",
+        "-u",
+        action="store_true",
+        default=False,
+        help="Append hardware MAC suffix to hostname to prevent LAN conflicts (e.g. 'my-api-a1b2.local')",
     )
 
     # Command: scan / discover

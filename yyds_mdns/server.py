@@ -33,6 +33,9 @@ class MDNSServer:
         server: Optional[str] = None,
         use_worker_lock: bool = False,
         verbose: bool = True,
+        unique: bool = False,
+        suffix_length: int = 4,
+        **kwargs: Any,
     ):
         self.verbose = verbose
         self.config = MDNSServiceConfig(
@@ -43,6 +46,9 @@ class MDNSServer:
             protocol=protocol,
             properties=properties,
             server=server,
+            unique=unique,
+            suffix_length=suffix_length,
+            **kwargs,
         )
         self.use_worker_lock = use_worker_lock
         self.engine = MDNSEngine(
@@ -68,6 +74,10 @@ class MDNSServer:
     @property
     def port(self) -> int:
         return self.config.port
+
+    @property
+    def device_suffix(self) -> str:
+        return self.config.device_suffix
 
     @property
     def is_registered(self) -> bool:

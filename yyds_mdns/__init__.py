@@ -24,7 +24,9 @@ from yyds_mdns.core.exceptions import (
 )
 from yyds_mdns.core.net_utils import (
     get_all_local_ips,
+    get_device_suffix,
     get_lan_ip,
+    get_mac_suffix,
     ip_to_bytes,
     is_valid_ipv4,
 )
@@ -47,6 +49,8 @@ __all__ = [
     "MDNSServiceConfig",
     "MDNSResolver",
     "get_lan_ip",
+    "get_mac_suffix",
+    "get_device_suffix",
     "get_all_local_ips",
     "ip_to_bytes",
     "is_valid_ipv4",

@@ -82,6 +82,23 @@ class TestNetUtils(unittest.TestCase):
         candidates = get_adapter_candidates()
         self.assertIsInstance(candidates, list)
 
+    def test_get_mac_suffix(self):
+        from yyds_mdns.core.net_utils import get_device_suffix, get_mac_suffix
+
+        suffix = get_mac_suffix()
+        self.assertIsInstance(suffix, str)
+        self.assertEqual(len(suffix), 4)
+        self.assertTrue(all(c in "0123456789abcdef" for c in suffix))
+
+        # Test custom length
+        suffix6 = get_mac_suffix(length=6)
+        self.assertEqual(len(suffix6), 6)
+        self.assertTrue(suffix6.endswith(suffix))
+
+        # Determinism test
+        self.assertEqual(get_mac_suffix(), suffix)
+        self.assertEqual(get_device_suffix(), suffix)
+
 
 if __name__ == "__main__":
     unittest.main()

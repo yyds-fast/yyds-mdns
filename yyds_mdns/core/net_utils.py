@@ -4,7 +4,12 @@
 Network utilities for intelligent IP and interface resolution.
 """
 
+import hashlib
+import os
+import platform
+import re
 import socket
+import uuid
 from typing import List, Optional, Tuple
 
 try:
@@ -225,3 +230,106 @@ def get_lan_ip(
             return c[2]
 
     return "127.0.0.1"
+
+
+def _read_linux_interface_mac(interface: str) -> Optional[str]:
+    """Read physical MAC address directly from Linux sysfs."""
+    try:
+        path = f"/sys/class/net/{interface}/address"
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                mac = f.read().strip().replace(":", "").replace("-", "").lower()
+                if mac and mac != "000000000000" and len(mac) == 12:
+                    return mac
+    except Exception:
+        pass
+    return None
+
+
+def _get_system_machine_id() -> str:
+    """Retrieve platform-specific stable machine identifier as fallback."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                        if content:
+                            return content
+                except FileNotFoundError:
+                    continue
+        elif system == "Darwin":
+            import subprocess
+
+            out = subprocess.check_output(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                text=True,
+                errors="ignore",
+            )
+            for line in out.splitlines():
+                if "IOPlatformUUID" in line:
+                    parts = line.split("=")
+                    if len(parts) > 1:
+                        return parts[-1].replace('"', "").strip()
+        elif system == "Windows":
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Cryptography",
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "MachineGuid")
+                if val:
+                    return str(val).strip()
+    except Exception:
+        pass
+    return f"{platform.node()}-{platform.machine()}"
+
+
+def get_mac_suffix(length: int = 4, interface: Optional[str] = None) -> str:
+    """
+    Return a stable, deterministic hexadecimal hardware suffix of the local machine.
+
+    1. If `interface` is given (or Linux primary physical adapter exists), attempts to read its MAC.
+    2. Fallback to `uuid.getnode()`.
+    3. If `uuid.getnode()` returned a random address (multicast bit set) or 0, fallback to system machine-id hash.
+    4. Slices the last `length` characters in lowercase.
+    """
+    mac_hex: Optional[str] = None
+
+    # 1. Try reading directly from Linux sysfs if interface specified or primary interface available
+    if interface:
+        mac_hex = _read_linux_interface_mac(interface)
+
+    if not mac_hex:
+        # Check primary candidate adapter from get_adapter_candidates()
+        candidates = get_adapter_candidates()
+        valid = [c for c in candidates if c[0] > 0]
+        if valid:
+            primary_adapter_name = valid[0][1]
+            mac_hex = _read_linux_interface_mac(primary_adapter_name)
+
+    # 2. uuid.getnode()
+    if not mac_hex:
+        try:
+            node = uuid.getnode()
+            is_random_mac = bool((node >> 40) & 0x01)
+            formatted = f"{node:012x}"
+            if not is_random_mac and formatted != "000000000000":
+                mac_hex = formatted
+        except Exception:
+            pass
+
+    # 3. Fallback to system machine ID hash
+    if not mac_hex:
+        machine_id = _get_system_machine_id()
+        mac_hex = hashlib.md5(machine_id.encode("utf-8")).hexdigest()
+
+    clean_hex = re.sub(r"[^0-9a-fA-F]", "", mac_hex).lower()
+    if len(clean_hex) < length:
+        clean_hex = clean_hex.rjust(length, "0")
+    return clean_hex[-length:]
+
+
+get_device_suffix = get_mac_suffix

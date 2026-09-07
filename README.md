@@ -158,6 +158,9 @@ Map any running port to a local domain without modifying code:
 # Broadcast a local port (e.g. Ollama or Docker container)
 yyds-mdns run --name my-ollama --port 11434
 
+# Multi-node / LAN collision prevention (appends MAC hardware suffix, e.g. my-ollama-e6d3.local)
+yyds-mdns run --name my-ollama --port 11434 --unique
+
 # Discover services in LAN
 yyds-mdns scan
 
@@ -177,8 +180,9 @@ yyds-mdns ip
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `name` | `str` | `None` (auto-inferred) | Domain/service prefix, inferred from `app.title`, `app.name`, or filename |
+| `name` | `str` | `None` (auto-inferred) | Domain/service prefix, inferred from `app.title`, `app.name`, or filename. Supports `{mac}` placeholder (e.g. `"node-{mac}"`) |
 | `port` | `int` | `None` (auto-inferred) | Service port, resolved from `PORT` env or framework defaults (Flask 5000, ASGI 8000) |
+| `unique` | `bool` | `False` | Multi-node conflict prevention. Automatically appends 4-char MAC suffix (e.g. `my-app-e6d3.local`) and injects `device_id` into TXT record |
 | `ip` | `str` | `None` (auto-detect) | Explicit IPv4 address override |
 | `interface` | `str` | `None` (smart choice) | Explicit network interface binding (e.g. `"eno1"`, `"eth0"`) |
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD service type, e.g. `"_https._tcp.local."` |

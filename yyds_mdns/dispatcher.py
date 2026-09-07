@@ -128,6 +128,7 @@ def MDNS(
     server: Optional[str] = None,
     use_worker_lock: bool = True,
     verbose: bool = True,
+    unique: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -162,6 +163,7 @@ def MDNS(
             server=server,
             use_worker_lock=use_worker_lock,
             verbose=verbose,
+            unique=unique,
             **kwargs,
         )
         return server_inst(app)
@@ -178,6 +180,7 @@ def MDNS(
             server=server,
             use_worker_lock=use_worker_lock,
             verbose=verbose,
+            unique=unique,
             **kwargs,
         )
 
@@ -194,6 +197,7 @@ def MDNS(
             server=server,
             use_worker_lock=use_worker_lock,
             verbose=verbose,
+            unique=unique,
             **kwargs,
         )
 
@@ -210,6 +214,7 @@ def MDNS(
             server=server,
             use_worker_lock=use_worker_lock,
             verbose=verbose,
+            unique=unique,
             **kwargs,
         )
 
@@ -224,5 +229,6 @@ def MDNS(
         server=server,
         use_worker_lock=use_worker_lock,
         verbose=verbose,
+        unique=unique,
         **kwargs,
     )

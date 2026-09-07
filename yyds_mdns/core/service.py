@@ -9,7 +9,12 @@ from typing import Any, Dict, Optional
 from zeroconf import ServiceInfo
 
 from yyds_mdns.core.exceptions import YYDSMDNSError
-from yyds_mdns.core.net_utils import get_lan_ip, ip_to_bytes, is_valid_ipv4
+from yyds_mdns.core.net_utils import (
+    get_lan_ip,
+    get_mac_suffix,
+    ip_to_bytes,
+    is_valid_ipv4,
+)
 
 
 def resolve_port(port: Optional[int] = None, default: int = 8000) -> int:
@@ -82,21 +87,58 @@ class MDNSServiceConfig:
         protocol: str = "_http._tcp.local.",
         properties: Optional[Dict[str, Any]] = None,
         server: Optional[str] = None,
+        unique: bool = False,
+        suffix_length: int = 4,
+        **kwargs: Any,
     ):
         self.raw_name = name
-        self.name = normalize_host_name(name)
-        self.port = resolve_port(port, default=8000)
         self.interface = interface
+        self.unique = unique or kwargs.get("unique_suffix", False)
+        self.suffix_length = suffix_length
+        self.device_suffix = ""
+
+        # Resolve suffix if template placeholder or unique flag is present
+        has_placeholder = (
+            ("{mac}" in name)
+            or ("{id}" in name)
+            or bool(server and ("{mac}" in server or "{id}" in server))
+        )
+        if has_placeholder or self.unique:
+            self.device_suffix = get_mac_suffix(
+                length=suffix_length, interface=interface
+            )
+
+        resolved_name = name
+        if "{mac}" in resolved_name or "{id}" in resolved_name:
+            resolved_name = resolved_name.replace(
+                "{mac}", self.device_suffix
+            ).replace("{id}", self.device_suffix)
+        elif self.unique:
+            base = normalize_host_name(resolved_name)
+            resolved_name = f"{base}-{self.device_suffix}"
+
+        self.name = normalize_host_name(resolved_name)
+        self.port = resolve_port(port, default=8000)
         self.ip = ip if ip else get_lan_ip(interface=interface)
         if not is_valid_ipv4(self.ip):
             raise ValueError(f"Invalid IPv4 address: {self.ip}")
 
         self.protocol = normalize_service_type(protocol)
-        self.properties = properties or {}
+        self.properties = dict(properties or {})
+        if self.device_suffix and "device_id" not in self.properties:
+            self.properties["device_id"] = self.device_suffix
 
         # Set server hostname (must end with .local.)
         if server:
-            clean_server = normalize_host_name(server)
+            resolved_server = server
+            if "{mac}" in resolved_server or "{id}" in resolved_server:
+                resolved_server = resolved_server.replace(
+                    "{mac}", self.device_suffix
+                ).replace("{id}", self.device_suffix)
+            elif self.unique:
+                base_srv = normalize_host_name(resolved_server)
+                resolved_server = f"{base_srv}-{self.device_suffix}"
+            clean_server = normalize_host_name(resolved_server)
             self.server = f"{clean_server}.local."
         else:
             self.server = f"{self.name}.local."
