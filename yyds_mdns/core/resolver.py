@@ -7,9 +7,12 @@ Supports both stateless classmethod calls and stateful context-managed instance 
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import math
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 from zeroconf import (
     AddressResolverIPv4,
     IPVersion,
@@ -38,6 +41,20 @@ class _DualMethod:
     def __get__(self, instance: Any, owner: Any = None) -> Callable[..., Any]:
         target = owner if instance is None else instance
         return lambda *args, **kwargs: self._func(target, *args, **kwargs)
+
+
+def _validate_timeout(timeout: float) -> float:
+    """Validate that timeout is a finite non-negative number."""
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout < 0
+    ):
+        raise ValueError(
+            f"timeout must be a non-negative finite number, got {timeout!r}"
+        )
+    return float(timeout)
 
 
 def _decode_properties(props: Dict[Any, Any]) -> Dict[str, Any]:
@@ -101,24 +118,59 @@ def _format_host_record(host_fqdn: str, addresses: List[str]) -> Dict[str, Any]:
     }
 
 
-def _build_full_service_name(name: str, stype: str) -> Tuple[str, str]:
+_HOST_PORT_SUFFIX_REGEX = re.compile(r"^([^:/\s]+):\d+$")
+
+
+def _extract_target_and_service_type(name: str, service_type: str) -> Tuple[str, str]:
     """
-    Build (full_service_name, clean_host_prefix) from short name, .local host,
-    or an already-qualified service name (e.g. from discover() output).
+    Support URL or `host:port` inputs (e.g. `http://my-api.local:8000/` or `my-api.local:8000`)
+    and automatically infer `_https._tcp.local.` / `_wss._tcp.local.` from URL scheme when default.
     """
     if not isinstance(name, str) or not name.strip():
         raise YYDSMDNSError("Host or service name cannot be empty.")
 
     raw = name.strip()
-    raw_dotted = raw if raw.endswith(".") else f"{raw}."
-    suffix = f".{stype.lower()}"
-    if raw_dotted.lower().endswith(suffix):
-        prefix = raw_dotted[: -len(suffix)]
-        if not prefix:
-            raise YYDSMDNSError("Host or service name cannot be empty.")
-        return f"{prefix}.{stype}", prefix
+    inferred_type = service_type
+    is_default_http = (service_type or "").strip().lower() in (
+        "",
+        "http",
+        "_http._tcp",
+        "_http._tcp.local",
+        "_http._tcp.local.",
+    )
 
-    clean_name = normalize_host_name(raw)
+    if "://" in raw:
+        parsed = urlsplit(raw)
+        if not parsed.hostname:
+            raise YYDSMDNSError(f"Invalid URL or service name: '{name}'")
+        raw = parsed.hostname
+        if is_default_http:
+            scheme = (parsed.scheme or "").lower()
+            if scheme == "https":
+                inferred_type = "_https._tcp.local."
+            elif scheme == "wss":
+                inferred_type = "_wss._tcp.local."
+            elif scheme == "ws":
+                inferred_type = "_ws._tcp.local."
+    else:
+        raw = raw.split("/", 1)[0].strip()
+        m = _HOST_PORT_SUFFIX_REGEX.match(raw)
+        if m:
+            raw = m.group(1)
+
+    stype = normalize_service_type(inferred_type)
+    return raw, stype
+
+
+def _build_full_service_name(name: str, stype: str) -> Tuple[str, str]:
+    """
+    Build (full_service_name, clean_host_prefix) from short name, .local host,
+    URL, host:port, or an already-qualified service name (e.g. from discover() output).
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise YYDSMDNSError("Host or service name cannot be empty.")
+
+    clean_name = normalize_host_name(name, service_type=stype)
     return f"{clean_name}.{stype}", clean_name
 
 
@@ -208,40 +260,74 @@ class MDNSResolver:
     def __init__(self) -> None:
         self._zc: Optional[Zeroconf] = None
         self._azc: Optional[AsyncZeroconf] = None
+        self._sync_lock = threading.Lock()
+        self._async_loop_lock: Optional[
+            Tuple[asyncio.AbstractEventLoop, asyncio.Lock]
+        ] = None
+        self._in_sync_cm = False
+        self._in_async_cm = False
+
+    def _get_async_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._async_loop_lock is None or self._async_loop_lock[0] is not loop:
+            self._async_loop_lock = (loop, asyncio.Lock())
+        return self._async_loop_lock[1]
 
     def close(self) -> None:
         """Close underlying synchronous Zeroconf instance if open."""
-        if self._zc is not None:
-            try:
-                self._zc.close()
-            except Exception:
-                pass
-            self._zc = None
+        with self._sync_lock:
+            self._in_sync_cm = False
+            if self._zc is not None:
+                try:
+                    self._zc.close()
+                except Exception:
+                    pass
+                self._zc = None
 
     async def async_close(self) -> None:
         """Close underlying asynchronous AsyncZeroconf instance if open."""
-        if self._azc is not None:
-            try:
-                await self._azc.async_close()
-            except Exception:
-                pass
-            self._azc = None
+        async with self._get_async_lock():
+            self._in_async_cm = False
+            if self._azc is not None:
+                try:
+                    await self._azc.async_close()
+                except Exception:
+                    pass
+                self._azc = None
 
     def __enter__(self) -> "MDNSResolver":
-        if self._zc is None:
-            self._zc = _create_zeroconf()
+        with self._sync_lock:
+            self._in_sync_cm = True
+            if self._zc is None:
+                self._zc = _create_zeroconf()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
     async def __aenter__(self) -> "MDNSResolver":
-        if self._azc is None:
-            self._azc = _create_async_zeroconf()
+        async with self._get_async_lock():
+            self._in_async_cm = True
+            if self._azc is None:
+                self._azc = _create_async_zeroconf()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.async_close()
+
+    def _acquire_sync_zc(self) -> Tuple[Zeroconf, bool]:
+        """Return (zc, should_close_after_call)."""
+        with self._sync_lock:
+            if self._in_sync_cm and self._zc is not None:
+                return self._zc, False
+        return _create_zeroconf(), True
+
+    async def _acquire_async_zc(self) -> Tuple[AsyncZeroconf, bool]:
+        """Return (azc, should_close_after_call)."""
+        async with self._get_async_lock():
+            if self._in_async_cm and self._azc is not None:
+                return self._azc, False
+        return _create_async_zeroconf(), True
 
     @_DualMethod
     def discover(
@@ -254,15 +340,13 @@ class MDNSResolver:
         Resolves discovered service records concurrently within a bounded timeout budget.
         """
         stype = normalize_service_type(service_type)
-        wait_sec = max(0.0, float(timeout))
+        wait_sec = _validate_timeout(timeout)
         followup_ms = min(1000, max(100, int(wait_sec * 1000)))
 
-        is_instance = isinstance(target, MDNSResolver)
-        owns_zc = not is_instance or target._zc is None
-        zc: Zeroconf = _create_zeroconf() if owns_zc else target._zc  # type: ignore[assignment]
-        if is_instance and target._zc is None:
-            target._zc = zc
-            owns_zc = False
+        if isinstance(target, MDNSResolver):
+            zc, owns_zc = target._acquire_sync_zc()
+        else:
+            zc, owns_zc = _create_zeroconf(), True
 
         listener = _DiscoveryListener()
         browser = ServiceBrowser(zc, stype, listener)
@@ -308,40 +392,52 @@ class MDNSResolver:
         """
         Resolve a specific DNS-SD service or pure .local host name to connection details.
         """
-        stype = normalize_service_type(service_type)
-        full_service_name, host_prefix = _build_full_service_name(name, stype)
-        total_sec = max(0.0, float(timeout))
+        raw_target, stype = _extract_target_and_service_type(name, service_type)
+        full_service_name, host_prefix = _build_full_service_name(raw_target, stype)
+        total_sec = _validate_timeout(timeout)
         timeout_ms = max(100, int(total_sec * 1000))
         deadline = time.monotonic() + total_sec
 
-        is_instance = isinstance(target, MDNSResolver)
-        owns_zc = not is_instance or target._zc is None
-        zc: Zeroconf = _create_zeroconf() if owns_zc else target._zc  # type: ignore[assignment]
-        if is_instance and target._zc is None:
-            target._zc = zc
-            owns_zc = False
+        if isinstance(target, MDNSResolver):
+            zc, owns_zc = target._acquire_sync_zc()
+        else:
+            zc, owns_zc = _create_zeroconf(), True
 
         try:
-            # Fast path: check warm cache if reusing MDNSResolver instance
             if isinstance(zc, Zeroconf):
                 cached = ServiceInfo(stype, full_service_name)
                 if cached.load_from_cache(zc) and cached.parsed_addresses():
                     return _format_service_info(cached)
 
-            svc_timeout_ms = (
-                max(100, int(timeout_ms * 0.7))
-                if (fallback_host_lookup and isinstance(zc, Zeroconf))
-                else timeout_ms
-            )
-            info = zc.get_service_info(stype, full_service_name, timeout=svc_timeout_ms)
-            if info:
-                return _format_service_info(info)
+            if (
+                fallback_host_lookup
+                and isinstance(zc, Zeroconf)
+                and getattr(zc, "loop", None) is not None
+            ):
 
-            if fallback_host_lookup and isinstance(zc, Zeroconf):
-                rem_ms = max(100, int((deadline - time.monotonic()) * 1000))
-                host_res = _resolve_host_ipv4_sync(zc, host_prefix, rem_ms)
-                if host_res:
+                async def _parallel_lookup() -> Optional[Dict[str, Any]]:
+                    ainfo = AsyncServiceInfo(stype, full_service_name)
+                    svc_ok, host_res = await asyncio.gather(
+                        ainfo.async_request(zc, timeout=timeout_ms),
+                        _resolve_host_ipv4_async(zc, host_prefix, timeout_ms),
+                    )
+                    if svc_ok:
+                        return _format_service_info(ainfo)
                     return host_res
+
+                fut = asyncio.run_coroutine_threadsafe(_parallel_lookup(), zc.loop)
+                res = fut.result(timeout=(total_sec + 1.0))
+                if res is not None:
+                    return res
+            else:
+                info = zc.get_service_info(stype, full_service_name, timeout=timeout_ms)
+                if info:
+                    return _format_service_info(info)
+                if fallback_host_lookup and isinstance(zc, Zeroconf):
+                    rem_ms = max(100, int((deadline - time.monotonic()) * 1000))
+                    host_res = _resolve_host_ipv4_sync(zc, host_prefix, rem_ms)
+                    if host_res:
+                        return host_res
 
             if raise_on_timeout:
                 raise MDNSResolutionTimeoutError(
@@ -360,17 +456,13 @@ class MDNSResolver:
     ) -> List[Dict[str, Any]]:
         """Asynchronously discover services in LAN with parallel record resolution."""
         stype = normalize_service_type(service_type)
-        wait_sec = max(0.0, float(timeout))
+        wait_sec = _validate_timeout(timeout)
         followup_ms = min(1000, max(100, int(wait_sec * 1000)))
 
-        is_instance = isinstance(target, MDNSResolver)
-        owns_azc = not is_instance or target._azc is None
-        azc: AsyncZeroconf = (
-            _create_async_zeroconf() if owns_azc else target._azc  # type: ignore[assignment]
-        )
-        if is_instance and target._azc is None:
-            target._azc = azc
-            owns_azc = False
+        if isinstance(target, MDNSResolver):
+            azc, owns_azc = await target._acquire_async_zc()
+        else:
+            azc, owns_azc = _create_async_zeroconf(), True
 
         listener = _DiscoveryListener()
         browser = AsyncServiceBrowser(azc.zeroconf, stype, listener)
@@ -411,18 +503,15 @@ class MDNSResolver:
         fallback_host_lookup: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Asynchronously resolve a DNS-SD service or pure .local host name without blocking."""
-        stype = normalize_service_type(service_type)
-        full_service_name, host_prefix = _build_full_service_name(name, stype)
-        timeout_ms = max(100, int(max(0.0, float(timeout)) * 1000))
+        raw_target, stype = _extract_target_and_service_type(name, service_type)
+        full_service_name, host_prefix = _build_full_service_name(raw_target, stype)
+        total_sec = _validate_timeout(timeout)
+        timeout_ms = max(100, int(total_sec * 1000))
 
-        is_instance = isinstance(target, MDNSResolver)
-        owns_azc = not is_instance or target._azc is None
-        azc: AsyncZeroconf = (
-            _create_async_zeroconf() if owns_azc else target._azc  # type: ignore[assignment]
-        )
-        if is_instance and target._azc is None:
-            target._azc = azc
-            owns_azc = False
+        if isinstance(target, MDNSResolver):
+            azc, owns_azc = await target._acquire_async_zc()
+        else:
+            azc, owns_azc = _create_async_zeroconf(), True
 
         try:
             info = AsyncServiceInfo(stype, full_service_name)
@@ -431,7 +520,6 @@ class MDNSResolver:
                     return _format_service_info(info)
 
             if fallback_host_lookup and isinstance(azc.zeroconf, Zeroconf):
-                # Query DNS-SD service and pure .local A-record concurrently within single timeout!
                 svc_ok, host_res = await asyncio.gather(
                     info.async_request(azc.zeroconf, timeout=timeout_ms),
                     _resolve_host_ipv4_async(azc.zeroconf, host_prefix, timeout_ms),

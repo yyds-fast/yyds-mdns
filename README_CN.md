@@ -134,17 +134,17 @@ def run_job():
 
 ---
 
-### 4. 客户端局域网服务发现与域名解析
+### 5. 客户端局域网服务发现与域名解析
 
 ```python
 from yyds_mdns import MDNSResolver
 
-# 1. 扫描局域网所有在线的 HTTP 服务
+# 1. 扫描局域网所有在线的 HTTP 服务（异步场景可使用 await MDNSResolver.async_discover(...)）
 services = MDNSResolver.discover(service_type="_http._tcp.local.", timeout=2.0)
 for s in services:
     print(s["name"], "->", s["url"], s["ip"])
 
-# 2. 精确解析指定的 .local 服务
+# 2. 精确解析指定的 .local 服务或设备主机（异步场景可使用 await MDNSResolver.async_resolve(...)）
 res = MDNSResolver.resolve("my-api")
 if res:
     print(f"Found IP: {res['ip']}, Port: {res['port']}")
@@ -152,7 +152,7 @@ if res:
 
 ---
 
-### 5. CLI 命令行工具
+### 6. CLI 命令行工具
 
 无需编写任何 Python 代码，即可直接把本地运行的任意端口映射为 mDNS 局域网域名：
 
@@ -192,6 +192,9 @@ yyds-mdns ip
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD 服务类型，如 `"_https._tcp.local."` |
 | `properties` | `dict` | `None` | 附加在 TXT 记录中的元数据字典 |
 | `use_worker_lock`| `bool` | `True` | 是否启用多 Worker 进程互斥锁，避免冲突 |
+| `allow_name_change`| `bool` | `False` | 局域网同名冲突时是否自动递增重命名（如 `my-api-2`） |
+| `strict` | `bool` | `True` | 设为 `False` 时注册失败仅打印告警并优雅降级，不阻塞宿主服务启动 |
+| `watch_interval` | `float` | `0.0` | 可选后台巡检周期（秒），支持 DHCP IP 变更热更新与从属 Worker 自动接管 |
 | `verbose` | `bool` | `True` | 是否在终端输出高亮访问域名提示与注销通知 |
 
 ---

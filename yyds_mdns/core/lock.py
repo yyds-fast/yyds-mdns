@@ -37,7 +37,7 @@ class WorkerLock:
     - Scoped per OS user to avoid multi-user /tmp EACCES permission collisions.
     - Does not unlink the lockfile after unlock, avoiding the POSIX flock+unlink inode race.
     - Seeks to byte 0 before Windows msvcrt unlock so byte-range lock releases cleanly.
-    - Tracks owner PID so forked children never accidentally unlock parent's flock.
+    - Tracks owner PID so forked children close inherited FDs without unlocking parent's flock.
     """
 
     def __init__(self, key: str):
@@ -50,21 +50,31 @@ class WorkerLock:
         self._is_locked = False
         self._owner_pid: Optional[int] = None
 
+    def _reset_if_forked(self) -> None:
+        """If inherited across os.fork(), close duplicated FD without releasing parent's flock."""
+        if self._owner_pid is not None and self._owner_pid != os.getpid():
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+            self._fd = None
+            self._is_locked = False
+            self._owner_pid = None
+
     def acquire(self) -> bool:
         """
         Attempt non-blocking lock acquisition.
         Returns True if acquired, False if already held by another worker/process.
         """
+        self._reset_if_forked()
         if self._is_locked and self._owner_pid == os.getpid():
             return True
 
         fd: Optional[int] = None
+        open_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         try:
-            fd = os.open(
-                self.lock_file_path,
-                os.O_CREAT | os.O_RDWR,
-                0o600,
-            )
+            fd = os.open(self.lock_file_path, open_flags, 0o600)
             if fcntl:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif msvcrt:

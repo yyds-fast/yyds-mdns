@@ -102,6 +102,17 @@ class ASGIMDNS:
         """Bind mDNS to ASGI application idempotently using optimal strategy."""
         self.app = app
 
+        # Clean up any previously active engine attached to this app before re-binding
+        prev_holder = getattr(app, "state", app)
+        prev_engine = getattr(prev_holder, "mdns_engine", None)
+        if prev_engine is not None and prev_engine is not self.engine:
+            sync_cleanup = getattr(prev_engine, "_sync_cleanup", None)
+            if callable(sync_cleanup):
+                try:
+                    sync_cleanup()
+                except Exception:
+                    pass
+
         # Strategy 1: FastAPI / Starlette in-place lifespan hook
         if hasattr(app, "router") and hasattr(app.router, "lifespan_context"):
             # Unwrap previous yyds_mdns lifespan wrapper if re-bound on same app
@@ -130,42 +141,47 @@ class ASGIMDNS:
             app.router.lifespan_context = _mdns_lifespan
             self._hooked_native = True
 
-        # Strategy 2: Sanic listeners
+        # Strategy 2: Sanic listeners (compatible with both `(app)` and `(app, loop)`)
         elif hasattr(app, "before_server_start") and hasattr(app, "after_server_stop"):
 
             @app.before_server_start
-            async def _start_sanic(sanic_app, loop):
+            async def _start_sanic(sanic_app, *args):
                 await self._start_and_sync()
 
             @app.after_server_stop
-            async def _stop_sanic(sanic_app, loop):
+            async def _stop_sanic(sanic_app, *args):
                 await self.engine.stop()
 
             self._hooked_native = True
 
         elif hasattr(app, "register_listener"):
 
-            async def _start_sanic_legacy(sanic_app, loop):
+            async def _start_sanic_legacy(sanic_app, *args):
                 await self._start_and_sync()
 
-            async def _stop_sanic_legacy(sanic_app, loop):
+            async def _stop_sanic_legacy(sanic_app, *args):
                 await self.engine.stop()
 
             app.register_listener(_start_sanic_legacy, "before_server_start")
             app.register_listener(_stop_sanic_legacy, "after_server_stop")
             self._hooked_native = True
 
-        # Strategy 3: aiohttp signals
+        # Strategy 3: aiohttp signals (idempotent across repeated init_app)
         elif hasattr(app, "on_startup") and hasattr(app, "on_cleanup"):
+            setattr(app, "_yyds_mdns_adapter", self)
+            if not getattr(app, "_yyds_mdns_aiohttp_hooked", False):
 
-            async def _start_aiohttp(aio_app):
-                await self._start_and_sync()
+                async def _start_aiohttp(aio_app):
+                    active: ASGIMDNS = getattr(aio_app, "_yyds_mdns_adapter")
+                    await active._start_and_sync()
 
-            async def _stop_aiohttp(aio_app):
-                await self.engine.stop()
+                async def _stop_aiohttp(aio_app):
+                    active: ASGIMDNS = getattr(aio_app, "_yyds_mdns_adapter")
+                    await active.engine.stop()
 
-            app.on_startup.append(_start_aiohttp)
-            app.on_cleanup.append(_stop_aiohttp)
+                app.on_startup.append(_start_aiohttp)
+                app.on_cleanup.append(_stop_aiohttp)
+                setattr(app, "_yyds_mdns_aiohttp_hooked", True)
             self._hooked_native = True
 
         # Strategy 4: Generic ASGI class instance (e.g. Django ASGIHandler, Litestar, Quart)

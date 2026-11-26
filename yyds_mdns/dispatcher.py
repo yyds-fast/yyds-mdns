@@ -197,12 +197,70 @@ def infer_service_name(app: Any = None, default: str = "service") -> str:
     return default
 
 
+def _infer_port_from_argv() -> Optional[int]:
+    """
+    Extract server listening port from web runner CLI flags (e.g. `uvicorn main:app --port 9000`,
+    `flask run -p 5001`, `gunicorn -b 0.0.0.0:8080`, `manage.py runserver 0.0.0.0:8001`).
+    """
+    try:
+        if not sys.argv:
+            return None
+        stem = Path(sys.argv[0] or "").stem.lower()
+        if stem in ("yyds-mdns", "yyds_mdns", "pytest", "unittest"):
+            return None
+
+        args = sys.argv[1:]
+        for idx, arg in enumerate(args):
+            val: Optional[str] = None
+            if arg in ("--port", "-p") and idx + 1 < len(args):
+                val = args[idx + 1]
+            elif arg.startswith("--port="):
+                val = arg.split("=", 1)[1]
+            elif arg.startswith("-p="):
+                val = arg.split("=", 1)[1]
+            elif arg in ("--bind", "-b") and idx + 1 < len(args):
+                bind_target = args[idx + 1]
+                if ":" in bind_target:
+                    val = bind_target.rsplit(":", 1)[1]
+            elif arg.startswith("--bind="):
+                bind_target = arg.split("=", 1)[1]
+                if ":" in bind_target:
+                    val = bind_target.rsplit(":", 1)[1]
+            elif arg == "runserver" and idx + 1 < len(args):
+                nxt = args[idx + 1]
+                if not nxt.startswith("-"):
+                    val = nxt.rsplit(":", 1)[-1]
+
+            if val and val.isdigit():
+                p = int(val)
+                if 1 <= p <= 65535:
+                    return p
+    except Exception:
+        pass
+    return None
+
+
 def infer_port(app: Any = None, port: Optional[int] = None) -> int:
     """
-    Intelligently infer port from arguments, environment variables, or framework conventions.
+    Intelligently infer port from explicit argument, environment variables,
+    web runner CLI flags, or framework conventions.
     """
+    if port is not None:
+        return resolve_port(port)
+
+    for env_k in ("PORT", "SERVER_PORT", "WEB_PORT"):
+        val = os.environ.get(env_k)
+        if val and val.isdigit():
+            p = int(val)
+            if 1 <= p <= 65535:
+                return p
+
+    argv_port = _infer_port_from_argv()
+    if argv_port is not None:
+        return argv_port
+
     default_port = 5000 if (app is not None and hasattr(app, "wsgi_app")) else 8000
-    return resolve_port(port, default=default_port)
+    return resolve_port(None, default=default_port)
 
 
 def MDNS(
@@ -236,6 +294,11 @@ def MDNS(
     - If app is None:
       returns universal MDNSServer (sync/async context manager & decorator).
     """
+    if app is not None and inspect.isclass(app):
+        raise TypeError(
+            f"MDNS() expects an application instance or function, got class {app.__name__!r}."
+        )
+
     resolved_name = name or infer_service_name(app, default="service")
     resolved_port = infer_port(app, port)
 

@@ -8,6 +8,7 @@ failover, and dynamic IP updates.
 import asyncio
 import atexit
 import logging
+import math
 import os
 import sys
 import threading
@@ -30,6 +31,21 @@ from yyds_mdns.core.net_utils import get_all_local_ips, get_local_interface_ips
 from yyds_mdns.core.service import MDNSServiceConfig
 
 logger = logging.getLogger("yyds_mdns")
+
+
+def _validate_watch_interval(watch_interval: float) -> float:
+    if watch_interval is None:
+        return 0.0
+    if (
+        isinstance(watch_interval, bool)
+        or not isinstance(watch_interval, (int, float))
+        or not math.isfinite(watch_interval)
+        or watch_interval < 0
+    ):
+        raise ValueError(
+            f"watch_interval must be a non-negative finite number, got {watch_interval!r}"
+        )
+    return float(watch_interval)
 
 
 def _safe_print(text: str, fallback: Optional[str] = None) -> None:
@@ -114,13 +130,47 @@ def _resolve_zeroconf_kwargs(target_ip: Optional[str] = None) -> Dict[str, Any]:
     return {"interfaces": InterfaceChoice.Default, "ip_version": IPVersion.V4Only}
 
 
+def _instantiate_sync_zeroconf(**kwargs: Any) -> Zeroconf:
+    """
+    Instantiate synchronous Zeroconf forced onto its own background thread (`use_asyncio=False`)
+    so calling synchronous APIs inside Jupyter Notebooks or active asyncio loops never deadlocks.
+    """
+    try:
+        return Zeroconf(use_asyncio=False, **kwargs)
+    except TypeError:
+        # Compatibility fallback for older zeroconf versions lacking `use_asyncio`
+        try:
+            asyncio.get_running_loop()
+            in_running_loop = True
+        except RuntimeError:
+            in_running_loop = False
+
+        if not in_running_loop:
+            return Zeroconf(**kwargs)
+
+        holder: Dict[str, Any] = {}
+
+        def _spawn() -> None:
+            try:
+                holder["zc"] = Zeroconf(**kwargs)
+            except BaseException as exc:
+                holder["err"] = exc
+
+        t = threading.Thread(target=_spawn, daemon=True)
+        t.start()
+        t.join()
+        if "err" in holder:
+            raise holder["err"]
+        return holder["zc"]
+
+
 def _create_zeroconf(target_ip: Optional[str] = None) -> Zeroconf:
     """Instantiate Zeroconf scoped to target IPv4 interface with automatic fallback."""
     kwargs = _resolve_zeroconf_kwargs(target_ip)
     try:
-        return Zeroconf(**kwargs)
+        return _instantiate_sync_zeroconf(**kwargs)
     except OSError:
-        return Zeroconf(ip_version=IPVersion.V4Only)
+        return _instantiate_sync_zeroconf(ip_version=IPVersion.V4Only)
 
 
 def _create_async_zeroconf(target_ip: Optional[str] = None) -> AsyncZeroconf:
@@ -151,7 +201,7 @@ class MDNSEngine:
         self.verbose = verbose
         self.allow_name_change = allow_name_change
         self.strict = strict
-        self.watch_interval = max(0.0, float(watch_interval or 0.0))
+        self.watch_interval = _validate_watch_interval(watch_interval)
 
         self._op_lock = threading.RLock()
         self._zeroconf: Optional[Zeroconf] = None
@@ -170,6 +220,18 @@ class MDNSEngine:
     def is_registered(self) -> bool:
         """True if service is actively broadcasted by this process."""
         return self._is_registered and self._owner_pid == os.getpid()
+
+    def _reset_if_forked(self) -> None:
+        """Drop inherited parent state across os.fork() without touching parent's Zeroconf."""
+        if self._owner_pid is not None and self._owner_pid != os.getpid():
+            self._zeroconf = None
+            self._service_info = None
+            self._is_registered = False
+            self._lock_held = False
+            self._owner_pid = None
+            self._atexit_registered = False
+            if self._worker_lock is not None:
+                self._worker_lock.release()
 
     def _register_atexit(self) -> None:
         if self.auto_atexit and not self._atexit_registered:
@@ -209,8 +271,7 @@ class MDNSEngine:
             try:
                 if self.is_registered:
                     self.refresh()
-                elif self._worker_lock is not None:
-                    # Standby worker failover: attempt takeover if primary worker exited
+                else:
                     self._start_once(from_watcher=True)
             except Exception as err:
                 logger.debug("mDNS watcher tick error: %s", err)
@@ -218,16 +279,31 @@ class MDNSEngine:
     def refresh(self) -> bool:
         """
         Re-probe LAN IP (in auto-IP mode) and dynamically update mDNS A-record if IP changed.
-        Returns True if record was updated.
+        Closes old Zeroconf socket first (without sending TTL=0 Goodbye) to prevent self-conflict
+        and relies on RFC 6762 Cache-Flush announcement on the new interface.
         """
         with self._op_lock:
+            self._reset_if_forked()
             if not self.is_registered or self._zeroconf is None:
+                # Recover if a previous manual refresh failed mid-transition while still holding lock
+                if self._lock_held and self._owner_pid == os.getpid():
+                    return self._start_once(from_watcher=True)
                 return False
+
+            prev_ip = self.config.ip
             if not self.config.refresh_ip():
                 return False
 
-            old_info = self._service_info
             old_zc = self._zeroconf
+            try:
+                old_zc.close()
+            except Exception:
+                pass
+            self._zeroconf = None
+            self._service_info = None
+            self._is_registered = False
+
+            new_zc: Optional[Zeroconf] = None
             try:
                 new_zc = _create_zeroconf(self.config.ip)
                 new_info = self.config.to_service_info()
@@ -235,38 +311,49 @@ class MDNSEngine:
                     new_info,
                     allow_name_change=self.allow_name_change,
                 )
+                if self.allow_name_change and self.config.sync_from_service_info(
+                    new_info
+                ):
+                    new_info.server = self.config.server
+                    new_zc.update_service(new_info)
+
                 self._zeroconf = new_zc
                 self._service_info = new_info
-                try:
-                    if old_info is not None:
-                        old_zc.unregister_service(old_info)
-                    old_zc.close()
-                except Exception:
-                    pass
+                self._is_registered = True
                 logger.info(
-                    "mDNS service IP updated dynamically: %s (%s)",
+                    "mDNS service IP updated dynamically: %s (%s -> %s)",
                     self.config.url,
+                    prev_ip,
                     self.config.ip,
                 )
                 return True
-            except Exception as err:
-                logger.warning(
-                    "Failed to refresh mDNS IP to %s: %s", self.config.ip, err
-                )
-                return False
+            except BaseException as err:
+                if new_zc is not None:
+                    try:
+                        new_zc.close()
+                    except Exception:
+                        pass
+                self.config.ip = prev_ip
+                if isinstance(err, Exception):
+                    logger.warning(
+                        "Failed to refresh mDNS IP; will retry on next check: %s", err
+                    )
+                    return False
+                raise
 
     def _start_once(self, from_watcher: bool = False) -> bool:
         with self._op_lock:
+            self._reset_if_forked()
             if self.is_registered:
                 return True
 
-            if self._worker_lock:
+            if self._worker_lock and not self._lock_held:
                 if not self._worker_lock.acquire():
                     logger.debug(
                         "Worker lock already held. Skipping mDNS registration on this worker: %s",
                         self.config.service_name,
                     )
-                    if not from_watcher:
+                    if not from_watcher and self.watch_interval > 0:
                         self._register_atexit()
                         self._ensure_watcher()
                     return False
@@ -305,6 +392,9 @@ class MDNSEngine:
                         self.config.service_name,
                         err,
                     )
+                    if self.watch_interval > 0:
+                        self._register_atexit()
+                        self._ensure_watcher()
                     return False
                 raise MDNSServiceConflictError(
                     f"Service name '{self.config.service_name}' already exists in LAN."
@@ -317,10 +407,16 @@ class MDNSEngine:
                         self.config.service_name,
                         err,
                     )
+                    if self.watch_interval > 0:
+                        self._register_atexit()
+                        self._ensure_watcher()
                     return False
                 raise MDNSRegistrationError(
                     f"Failed to register mDNS service: {err}"
                 ) from err
+            except BaseException:
+                self._cleanup_resources()
+                raise
 
     def start(self) -> bool:
         """
@@ -392,7 +488,7 @@ class AsyncMDNSEngine:
         self.verbose = verbose
         self.allow_name_change = allow_name_change
         self.strict = strict
-        self.watch_interval = max(0.0, float(watch_interval or 0.0))
+        self.watch_interval = _validate_watch_interval(watch_interval)
 
         self._loop_lock: Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = None
         self._async_zeroconf: Optional[AsyncZeroconf] = None
@@ -417,6 +513,19 @@ class AsyncMDNSEngine:
     def is_registered(self) -> bool:
         """True if service is actively broadcasted by this process."""
         return self._is_registered and self._owner_pid == os.getpid()
+
+    def _reset_if_forked(self) -> None:
+        """Drop inherited parent state across os.fork() without touching parent's AsyncZeroconf."""
+        if self._owner_pid is not None and self._owner_pid != os.getpid():
+            self._async_zeroconf = None
+            self._service_info = None
+            self._is_registered = False
+            self._lock_held = False
+            self._owner_pid = None
+            self._atexit_registered = False
+            self._watch_task = None
+            if self._worker_lock is not None:
+                self._worker_lock.release()
 
     def _register_atexit(self) -> None:
         if self.auto_atexit and not self._atexit_registered:
@@ -457,7 +566,7 @@ class AsyncMDNSEngine:
                 try:
                     if self.is_registered:
                         await self.refresh()
-                    elif self._worker_lock is not None:
+                    else:
                         await self._start_once(from_watcher=True)
                 except Exception as err:
                     logger.debug("Async mDNS watcher tick error: %s", err)
@@ -491,16 +600,30 @@ class AsyncMDNSEngine:
     async def refresh(self) -> bool:
         """
         Re-probe LAN IP (in auto-IP mode) and dynamically update mDNS A-record if IP changed.
-        Returns True if record was updated.
+        Closes old AsyncZeroconf first (without sending TTL=0 Goodbye) to avoid self-conflict
+        and uses RFC 6762 Cache-Flush announcement on the new interface.
         """
         async with self._get_op_lock():
+            self._reset_if_forked()
             if not self.is_registered or self._async_zeroconf is None:
+                if self._lock_held and self._owner_pid == os.getpid():
+                    return await self._start_once(from_watcher=True)
                 return False
+
+            prev_ip = self.config.ip
             if not self.config.refresh_ip():
                 return False
 
-            old_info = self._service_info
             old_azc = self._async_zeroconf
+            try:
+                await old_azc.async_close()
+            except Exception:
+                pass
+            self._async_zeroconf = None
+            self._service_info = None
+            self._is_registered = False
+
+            new_azc: Optional[AsyncZeroconf] = None
             try:
                 new_azc = _create_async_zeroconf(self.config.ip)
                 new_info = self.config.to_service_info()
@@ -508,38 +631,52 @@ class AsyncMDNSEngine:
                     new_info,
                     allow_name_change=self.allow_name_change,
                 )
+                if self.allow_name_change and self.config.sync_from_service_info(
+                    new_info
+                ):
+                    new_info.server = self.config.server
+                    async_update = getattr(new_azc, "async_update_service", None)
+                    if callable(async_update):
+                        await async_update(new_info)
+
                 self._async_zeroconf = new_azc
                 self._service_info = new_info
-                try:
-                    if old_info is not None:
-                        await old_azc.async_unregister_service(old_info)
-                    await old_azc.async_close()
-                except Exception:
-                    pass
+                self._is_registered = True
                 logger.info(
-                    "Async mDNS service IP updated dynamically: %s (%s)",
+                    "Async mDNS service IP updated dynamically: %s (%s -> %s)",
                     self.config.url,
+                    prev_ip,
                     self.config.ip,
                 )
                 return True
-            except Exception as err:
-                logger.warning(
-                    "Failed to refresh async mDNS IP to %s: %s", self.config.ip, err
-                )
-                return False
+            except BaseException as err:
+                if new_azc is not None:
+                    try:
+                        await new_azc.async_close()
+                    except Exception:
+                        pass
+                self.config.ip = prev_ip
+                if isinstance(err, Exception):
+                    logger.warning(
+                        "Failed to refresh async mDNS IP; will retry on next check: %s",
+                        err,
+                    )
+                    return False
+                raise
 
     async def _start_once(self, from_watcher: bool = False) -> bool:
         async with self._get_op_lock():
+            self._reset_if_forked()
             if self.is_registered:
                 return True
 
-            if self._worker_lock:
+            if self._worker_lock and not self._lock_held:
                 if not self._worker_lock.acquire():
                     logger.debug(
                         "Worker lock already held. Skipping async mDNS registration on this worker: %s",
                         self.config.service_name,
                     )
-                    if not from_watcher:
+                    if not from_watcher and self.watch_interval > 0:
                         self._register_atexit()
                         self._ensure_watcher()
                     return False
@@ -584,6 +721,9 @@ class AsyncMDNSEngine:
                         self.config.service_name,
                         err,
                     )
+                    if self.watch_interval > 0:
+                        self._register_atexit()
+                        self._ensure_watcher()
                     return False
                 raise MDNSServiceConflictError(
                     f"Service name '{self.config.service_name}' already exists in LAN."
@@ -596,10 +736,16 @@ class AsyncMDNSEngine:
                         self.config.service_name,
                         err,
                     )
+                    if self.watch_interval > 0:
+                        self._register_atexit()
+                        self._ensure_watcher()
                     return False
                 raise MDNSRegistrationError(
                     f"Failed to register async mDNS service: {err}"
                 ) from err
+            except BaseException:
+                await self._cleanup_resources()
+                raise
 
     async def start(self) -> bool:
         """

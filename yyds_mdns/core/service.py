@@ -7,6 +7,7 @@ mDNS Service configuration and DNS-SD / A-record builder.
 import os
 import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 from zeroconf import ServiceInfo
 
 from yyds_mdns.core.exceptions import YYDSMDNSError
@@ -20,7 +21,9 @@ from yyds_mdns.core.net_utils import (
 MAX_DNS_LABEL_BYTES = 63
 MAX_SERVICE_TYPE_BYTES = 15
 MAX_TXT_PAIR_BYTES = 255
+MAX_TXT_TOTAL_BYTES = 4000
 _SERVICE_TYPE_LABEL_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_ASCII_HOST_LABEL_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
 
 def resolve_port(port: Optional[int] = None, default: int = 8000) -> int:
@@ -103,15 +106,27 @@ def normalize_service_type(protocol: str) -> str:
     return f"{'.'.join(normalized_parts)}.{transport}.local."
 
 
-def normalize_host_name(name: str) -> str:
+def normalize_host_name(name: str, service_type: Optional[str] = None) -> str:
     """
     Normalize service or host name:
     'my-app.local' -> 'my-app'
     'my-app.local.' -> 'my-app'
+    'my-app._http._tcp.local.' -> 'my-app' (when service_type provided)
     """
     if not isinstance(name, str):
         raise YYDSMDNSError("Host or service name must be a string.")
     clean = name.strip()
+    if "://" in clean:
+        parsed = urlsplit(clean)
+        if not parsed.hostname:
+            raise YYDSMDNSError(f"Invalid URL or host name: '{name}'")
+        clean = parsed.hostname
+    if service_type:
+        dotted = clean if clean.endswith(".") else f"{clean}."
+        suffix = f".{service_type.lower()}"
+        if dotted.lower().endswith(suffix):
+            clean = dotted[: -len(suffix)]
+
     low = clean.lower()
     if low.endswith(".local."):
         clean = clean[:-7]
@@ -143,34 +158,73 @@ def _validate_dns_labels(name: str, context: str = "name") -> None:
             )
 
 
-def _normalize_server_hostname(raw_host: str) -> str:
+def _encode_host_label(raw_label: str) -> str:
     """
-    Normalize a host string into a URL-safe, RFC-friendly .local hostname prefix.
-    Replaces whitespace and underscores with hyphens so `name='My App'` or `name='my_api'`
-    produces a valid clickable URL (`http://my-app.local:8000`).
+    Convert a single host label into an RFC 1123 / IDNA Punycode ASCII label
+    so browsers resolving `http://客厅音箱.local:8000` (which query `xn--...local.`)
+    match the registered mDNS A-record.
+    """
+    cleaned = re.sub(r"[\s_:/?#\[\]@!$&'()*+,;=]+", "-", raw_label.strip())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-").lower()
+    if not cleaned:
+        return ""
+
+    if cleaned.isascii():
+        ascii_clean = re.sub(r"[^a-z0-9-]+", "-", cleaned)
+        ascii_clean = re.sub(r"-{2,}", "-", ascii_clean).strip("-")
+        return ascii_clean[:MAX_DNS_LABEL_BYTES].rstrip("-")
+
+    # Internationalized domain label (e.g. Chinese/Japanese/accented characters) -> IDNA Punycode
+    try:
+        puny = cleaned.encode("idna").decode("ascii").lower().strip("-")
+        if (
+            puny
+            and len(puny) <= MAX_DNS_LABEL_BYTES
+            and _ASCII_HOST_LABEL_REGEX.match(puny)
+        ):
+            return puny
+    except UnicodeError:
+        pass
+
+    # Strip non-ASCII symbols (e.g. emojis in `"🚀 my-api"` -> `"my-api"`)
+    ascii_fallback = re.sub(r"[^a-z0-9-]+", "-", cleaned)
+    ascii_fallback = re.sub(r"-{2,}", "-", ascii_fallback).strip("-")
+    return ascii_fallback[:MAX_DNS_LABEL_BYTES].rstrip("-")
+
+
+def _normalize_server_hostname(
+    raw_host: str, allow_fallback: bool = False, interface: Optional[str] = None
+) -> str:
+    """
+    Normalize a host string into a URL-safe, browser-resolvable .local hostname prefix.
     """
     labels = []
     for raw_label in raw_host.split("."):
-        # Replace whitespace, underscores, and URL-unsafe punctuation with hyphens
-        cleaned = re.sub(r"[\s_:/?#\[\]@!$&'()*+,;=]+", "-", raw_label.strip())
-        cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-").lower()
-        if cleaned:
-            cleaned = _truncate_utf8_bytes(cleaned, MAX_DNS_LABEL_BYTES)
-        if cleaned:
-            labels.append(cleaned)
+        encoded_label = _encode_host_label(raw_label)
+        if encoded_label:
+            labels.append(encoded_label)
 
     if not labels:
-        raise YYDSMDNSError(f"Cannot derive a valid DNS hostname from '{raw_host}'.")
+        if allow_fallback:
+            labels = [f"service-{get_mac_suffix(4, interface=interface)}"]
+        else:
+            raise YYDSMDNSError(
+                f"Cannot derive a valid DNS hostname from '{raw_host}'."
+            )
     result = ".".join(labels)
     _validate_dns_labels(result, context="server")
     return result
 
 
 def _normalize_txt_properties(props: Optional[Dict[Any, Any]]) -> Dict[str, Any]:
-    """Normalize TXT property keys to strings and validate RFC 6763 <= 255-byte entry limit."""
+    """
+    Normalize TXT property keys to strings and validate RFC 6763 per-entry (<= 255 bytes)
+    and total TXT payload size limits.
+    """
     if not props:
         return {}
     normalized: Dict[str, Any] = {}
+    total_wire_bytes = 0
     for raw_k, val in props.items():
         key = (
             raw_k.decode("utf-8", errors="replace")
@@ -192,6 +246,11 @@ def _normalize_txt_properties(props: Optional[Dict[Any, Any]]) -> Dict[str, Any]
         if pair_len > MAX_TXT_PAIR_BYTES:
             raise YYDSMDNSError(
                 f"TXT property '{key}' exceeds {MAX_TXT_PAIR_BYTES} bytes (got {pair_len} bytes)."
+            )
+        total_wire_bytes += 1 + pair_len
+        if total_wire_bytes > MAX_TXT_TOTAL_BYTES:
+            raise YYDSMDNSError(
+                f"Total TXT properties payload exceeds {MAX_TXT_TOTAL_BYTES} bytes."
             )
         normalized[key] = val
     return normalized
@@ -245,6 +304,9 @@ class MDNSServiceConfig:
         self.device_suffix = ""
         self._custom_server = bool(server)
 
+        # Normalize protocol early so full service names in `name` can strip `.{self.protocol}`
+        self.protocol = normalize_service_type(protocol)
+
         # Resolve suffix if template placeholder or unique flag is present
         has_placeholder = (
             ("{mac}" in name)
@@ -261,12 +323,12 @@ class MDNSServiceConfig:
             resolved_name = resolved_name.replace("{mac}", self.device_suffix).replace(
                 "{id}", self.device_suffix
             )
-            self.name = normalize_host_name(resolved_name)
+            self.name = normalize_host_name(resolved_name, service_type=self.protocol)
         elif self.unique:
-            base = normalize_host_name(resolved_name)
+            base = normalize_host_name(resolved_name, service_type=self.protocol)
             self.name = _append_unique_suffix(base, self.device_suffix)
         else:
-            self.name = normalize_host_name(resolved_name)
+            self.name = normalize_host_name(resolved_name, service_type=self.protocol)
 
         if len(self.name.encode("utf-8")) > MAX_DNS_LABEL_BYTES:
             raise YYDSMDNSError(
@@ -282,12 +344,11 @@ class MDNSServiceConfig:
         if not is_valid_ipv4(self.ip) or self.ip in ("0.0.0.0", "255.255.255.255"):
             raise ValueError(f"Invalid IPv4 address: {self.ip}")
 
-        self.protocol = normalize_service_type(protocol)
         self.properties = _normalize_txt_properties(properties)
         if self.device_suffix and "device_id" not in self.properties:
             self.properties["device_id"] = self.device_suffix
 
-        # Set server hostname (must end with .local. and be URL-safe)
+        # Set server hostname (must end with .local. and be browser/IDNA resolvable)
         if server:
             resolved_server = server
             if "{mac}" in resolved_server or "{id}" in resolved_server:
@@ -300,10 +361,14 @@ class MDNSServiceConfig:
                 clean_server = _append_unique_suffix(base_srv, self.device_suffix)
             else:
                 clean_server = normalize_host_name(resolved_server)
-            safe_server = _normalize_server_hostname(clean_server)
+            safe_server = _normalize_server_hostname(
+                clean_server, allow_fallback=False, interface=interface
+            )
             self.server = f"{safe_server}.local."
         else:
-            safe_server = _normalize_server_hostname(self.name)
+            safe_server = _normalize_server_hostname(
+                self.name, allow_fallback=True, interface=interface
+            )
             self.server = f"{safe_server}.local."
 
     def refresh_ip(self) -> bool:
@@ -341,7 +406,10 @@ class MDNSServiceConfig:
 
         self.name = actual_instance
         if not self._custom_server:
-            new_server = f"{_normalize_server_hostname(actual_instance)}.local."
+            safe_host = _normalize_server_hostname(
+                actual_instance, allow_fallback=True, interface=self.interface
+            )
+            new_server = f"{safe_host}.local."
             if new_server != self.server:
                 self.server = new_server
                 return True

@@ -418,6 +418,28 @@ class TestProtocols(unittest.TestCase):
             "my-background-worker",
         )
 
+    def test_infer_port_from_cli_flags_and_class_guard(self):
+        from yyds_mdns.dispatcher import infer_port
+
+        with patch.dict(os.environ, {}, clear=False):
+            for k in ("PORT", "SERVER_PORT", "WEB_PORT"):
+                os.environ.pop(k, None)
+
+            with patch("sys.argv", ["uvicorn", "main:app", "--port", "9090"]):
+                self.assertEqual(infer_port(), 9090)
+            with patch("sys.argv", ["flask", "run", "-p", "5005"]):
+                self.assertEqual(infer_port(), 5005)
+            with patch("sys.argv", ["gunicorn", "main:app", "-b", "0.0.0.0:8088"]):
+                self.assertEqual(infer_port(), 8088)
+            with patch("sys.argv", ["manage.py", "runserver", "0.0.0.0:8001"]):
+                self.assertEqual(infer_port(), 8001)
+
+        class NotAnInstance:
+            pass
+
+        with self.assertRaises(TypeError):
+            MDNS(NotAnInstance)
+
     def test_unified_dispatcher(self):
         if FastAPI is not None:
             fa_app = FastAPI()

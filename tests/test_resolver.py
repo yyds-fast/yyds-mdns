@@ -175,6 +175,39 @@ class TestResolver(unittest.TestCase):
                 mock_zc.close.assert_not_called()
             mock_zc.close.assert_called_once()
 
+        # Calling instance WITHOUT `with` must still close temporary Zeroconf (no leak!)
+        standalone_zc = MagicMock()
+        standalone_zc.get_service_info.return_value = None
+        with patch(
+            "yyds_mdns.core.resolver._create_zeroconf", return_value=standalone_zc
+        ):
+            r = MDNSResolver()
+            self.assertIsNone(r.resolve("missing", timeout=0.1))
+            standalone_zc.close.assert_called_once()
+
+        # Invalid timeout values (negative, NaN, Inf, bool) must raise ValueError
+        for bad_timeout in (-1.0, float("inf"), float("nan"), True):
+            with self.assertRaises(ValueError):
+                MDNSResolver.resolve("x", timeout=bad_timeout)  # type: ignore[arg-type]
+
+    def test_resolve_accepts_full_url_and_host_port(self):
+        mock_zc = MagicMock()
+        mock_zc.get_service_info.return_value = _make_service_info(
+            name="secure-api",
+            stype="_https._tcp.local.",
+            ip="192.168.1.99",
+            port=8443,
+        )
+        with patch("yyds_mdns.core.resolver._create_zeroconf", return_value=mock_zc):
+            res = MDNSResolver.resolve(
+                "https://secure-api.local:8443/v1/health", timeout=0.2
+            )
+            self.assertIsNotNone(res)
+            self.assertEqual(res["url"], "https://secure-api.local:8443")
+            mock_zc.get_service_info.assert_called_once_with(
+                "_https._tcp.local.", "secure-api._https._tcp.local.", timeout=200
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

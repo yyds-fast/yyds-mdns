@@ -60,6 +60,31 @@ class TestWorkerLock(unittest.TestCase):
             lock1.release()
             lock2.release()
 
+    def test_forked_child_acquire_closes_inherited_fd_no_leak(self):
+        parent_lock = WorkerLock("test_fork_acquire_key")
+        other_lock = WorkerLock("test_fork_acquire_key")
+        try:
+            self.assertTrue(parent_lock.acquire())
+            inherited_fd = os.dup(parent_lock._fd)  # type: ignore[arg-type]
+
+            child_lock = WorkerLock("test_fork_acquire_key")
+            child_lock._fd = inherited_fd
+            child_lock._is_locked = True
+            child_lock._owner_pid = parent_lock._owner_pid
+
+            with patch(
+                "yyds_mdns.core.lock.os.getpid", return_value=os.getpid() + 88888
+            ):
+                # Child attempts acquire while parent holds lock -> must return False AND close inherited_fd!
+                self.assertFalse(child_lock.acquire())
+
+            # Verify inherited_fd was closed so releasing parent_lock truly frees the kernel flock
+            parent_lock.release()
+            self.assertTrue(other_lock.acquire())
+        finally:
+            parent_lock.release()
+            other_lock.release()
+
 
 if __name__ == "__main__":
     unittest.main()

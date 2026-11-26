@@ -62,63 +62,69 @@ def _cmd_run(args: argparse.Namespace) -> None:
     )
 
     stop_event = threading.Event()
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    prev_sigint = signal.getsignal(signal.SIGINT) if is_main_thread else None
+    prev_sigterm = signal.getsignal(signal.SIGTERM) if is_main_thread else None
 
     def _signal_handler(sig, frame):
         stop_event.set()
 
-    prev_sigint = signal.getsignal(signal.SIGINT)
-    prev_sigterm = signal.getsignal(signal.SIGTERM)
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    if is_main_thread:
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
         engine.start()
     except BaseException:
-        signal.signal(signal.SIGINT, prev_sigint)
-        signal.signal(signal.SIGTERM, prev_sigterm)
+        if is_main_thread:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
         raise
 
-    _safe_print("\n" + "=" * 55)
-    _safe_print(
-        "  🚀 YYDS-mDNS Local Service Broadcaster",
-        fallback="  [YYDS-mDNS] Local Service Broadcaster",
-    )
-    _safe_print("=" * 55)
-    _safe_print(
-        f"  • Service Name : {config.name}",
-        fallback=f"  * Service Name : {config.name}",
-    )
-    _safe_print(
-        f"  • Local Domain : {config.host_name}",
-        fallback=f"  * Local Domain : {config.host_name}",
-    )
-    if config.device_suffix:
+    if not stop_event.is_set():
+        _safe_print("\n" + "=" * 55)
         _safe_print(
-            f"  • Device Suffix: {config.device_suffix}",
-            fallback=f"  * Device Suffix: {config.device_suffix}",
+            "  🚀 YYDS-mDNS Local Service Broadcaster",
+            fallback="  [YYDS-mDNS] Local Service Broadcaster",
         )
-    _safe_print(
-        f"  • LAN IP       : {config.ip}", fallback=f"  * LAN IP       : {config.ip}"
-    )
-    if config.interface:
+        _safe_print("=" * 55)
         _safe_print(
-            f"  • Interface    : {config.interface}",
-            fallback=f"  * Interface    : {config.interface}",
+            f"  • Service Name : {config.name}",
+            fallback=f"  * Service Name : {config.name}",
         )
-    _safe_print(
-        f"  • Port         : {config.port}",
-        fallback=f"  * Port         : {config.port}",
-    )
-    _safe_print(
-        f"  • Access URL   : {config.url}", fallback=f"  * Access URL   : {config.url}"
-    )
-    _safe_print(
-        f"  • DNS-SD Type  : {config.protocol}",
-        fallback=f"  * DNS-SD Type  : {config.protocol}",
-    )
-    _safe_print("=" * 55)
-    _safe_print("  Broadcasting... Press Ctrl+C to stop.")
-    _safe_print("=" * 55 + "\n")
+        _safe_print(
+            f"  • Local Domain : {config.host_name}",
+            fallback=f"  * Local Domain : {config.host_name}",
+        )
+        if config.device_suffix:
+            _safe_print(
+                f"  • Device Suffix: {config.device_suffix}",
+                fallback=f"  * Device Suffix: {config.device_suffix}",
+            )
+        _safe_print(
+            f"  • LAN IP       : {config.ip}",
+            fallback=f"  * LAN IP       : {config.ip}",
+        )
+        if config.interface:
+            _safe_print(
+                f"  • Interface    : {config.interface}",
+                fallback=f"  * Interface    : {config.interface}",
+            )
+        _safe_print(
+            f"  • Port         : {config.port}",
+            fallback=f"  * Port         : {config.port}",
+        )
+        _safe_print(
+            f"  • Access URL   : {config.url}",
+            fallback=f"  * Access URL   : {config.url}",
+        )
+        _safe_print(
+            f"  • DNS-SD Type  : {config.protocol}",
+            fallback=f"  * DNS-SD Type  : {config.protocol}",
+        )
+        _safe_print("=" * 55)
+        _safe_print("  Broadcasting... Press Ctrl+C to stop.")
+        _safe_print("=" * 55 + "\n")
 
     try:
         while not stop_event.is_set():
@@ -126,8 +132,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        signal.signal(signal.SIGINT, prev_sigint)
-        signal.signal(signal.SIGTERM, prev_sigterm)
+        if is_main_thread:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
         _safe_print(
             "\n\n  👋 Stopping mDNS broadcast (sending Goodbye packet)...",
             fallback="\n\n  [mDNS] Stopping mDNS broadcast (sending Goodbye packet)...",

@@ -132,17 +132,17 @@ def serve():
 
 ---
 
-### 4. Service Discovery & Resolution Client
+### 5. Service Discovery & Resolution Client
 
 ```python
 from yyds_mdns import MDNSResolver
 
-# 1. Discover all active HTTP services in LAN
+# 1. Discover all active HTTP services in LAN (async_discover also available)
 services = MDNSResolver.discover(service_type="_http._tcp.local.", timeout=2.0)
 for s in services:
     print(s["name"], "->", s["url"], s["ip"])
 
-# 2. Resolve a specific .local host
+# 2. Resolve a specific .local service or host (async_resolve also available)
 res = MDNSResolver.resolve("my-api")
 if res:
     print(f"IP: {res['ip']}, Port: {res['port']}")
@@ -150,7 +150,7 @@ if res:
 
 ---
 
-### 5. Command-Line Interface (CLI)
+### 6. Command-Line Interface (CLI)
 
 Map any running port to a local domain without modifying code:
 
@@ -188,6 +188,9 @@ yyds-mdns ip
 | `protocol` | `str` | `"_http._tcp.local."` | DNS-SD service type, e.g. `"_https._tcp.local."` |
 | `properties` | `dict` | `None` | Key-value pairs stored in DNS TXT record |
 | `use_worker_lock`| `bool` | `True` | Prevents multi-worker broadcast collision |
+| `allow_name_change` | `bool` | `False` | Automatically renames service (e.g. `my-api-2`) upon LAN collision |
+| `strict` | `bool` | `True` | When `False`, logs a warning and degrades gracefully on registration failure |
+| `watch_interval` | `float` | `0.0` | Optional background interval (seconds) for DHCP IP refresh & worker failover |
 | `verbose` | `bool` | `True` | Whether to print startup banner and shutdown notice to terminal |
 
 ---

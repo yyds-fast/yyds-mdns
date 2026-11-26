@@ -89,6 +89,34 @@ class TestService(unittest.TestCase):
         self.assertEqual(cfg.name, "My Cool_App-2")
         self.assertEqual(cfg.url, "http://my-cool-app-2.local:8080")
 
+    def test_chinese_idna_hostname_and_full_service_name_input(self):
+        # Chinese service name keeps readable instance name while IDNA-encoding .local A-record
+        cn_cfg = MDNSServiceConfig(name="客厅音箱", port=8000, ip="127.0.0.1")
+        self.assertEqual(cn_cfg.name, "客厅音箱")
+        self.assertEqual(
+            cn_cfg.host_name, f"{'客厅音箱'.encode('idna').decode('ascii')}.local"
+        )
+
+        # Emoji name encodes via Punycode; pure punctuation falls back cleanly to service-<suffix>.local
+        emoji_cfg = MDNSServiceConfig(name="🚀", port=8000, ip="127.0.0.1")
+        self.assertTrue(emoji_cfg.host_name.startswith("xn--"))
+        punct_cfg = MDNSServiceConfig(name="!!!", port=8000, ip="127.0.0.1")
+        self.assertTrue(punct_cfg.host_name.startswith("service-"))
+
+        # Full service name input does not duplicate ._http._tcp.local.
+        full_cfg = MDNSServiceConfig(
+            name="my-api._http._tcp.local.", port=8000, ip="127.0.0.1"
+        )
+        self.assertEqual(full_cfg.name, "my-api")
+        self.assertEqual(full_cfg.service_name, "my-api._http._tcp.local.")
+
+        # Total TXT payload > 4000 bytes raises YYDSMDNSError
+        huge_props = {f"k{i}": "v" * 200 for i in range(25)}
+        with self.assertRaises(YYDSMDNSError):
+            MDNSServiceConfig(
+                name="app", port=8000, ip="127.0.0.1", properties=huge_props
+            )
+
     def test_service_config_wildcard_ip_auto_resolves(self):
         config = MDNSServiceConfig(name="app", port=8000, ip="0.0.0.0")
         self.assertNotEqual(config.ip, "0.0.0.0")
