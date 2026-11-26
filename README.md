@@ -17,7 +17,7 @@ Map `http://192.168.x.x:8000` to `http://my-service.local:8000` with just **one 
 ## ✨ Features
 
 - ⚡ **One-Line Integration**: Seamless lifespan hook for FastAPI / Starlette and Flask extensions.
-- 🌐 **Real Hostname Resolution**: Assembles both DNS-SD and A/AAAA host records so LAN browsers can directly navigate to `.local` domains.
+- 🌐 **Real Hostname Resolution**: Assembles both DNS-SD and IPv4 `A` host records so LAN browsers can directly navigate to `.local` domains.
 - 🧠 **Smart Interface & IP Detection**: Automatically probes the OS outbound routing table and filters out loopback, unconfigured link-local, and Docker virtual bridges.
 - 🛡️ **Graceful Shutdown (Goodbye Packet)**: Automatically broadcasts TTL=0 goodbye packets upon SIGINT/SIGTERM or normal exit to avoid stale DNS caching on clients.
 - 🔒 **Multi-Worker Process Lock**: Safe under `uvicorn --workers 4` or Gunicorn deployments by ensuring only one process holds the broadcast.

@@ -2,12 +2,13 @@
 # -*- coding:utf-8 -*-
 
 import os
-from codecs import open
 from setuptools import find_packages, setup
 
 about = {}
 here = os.path.abspath(os.path.dirname(__file__))
-with open(os.path.join(here, "yyds_mdns", "__version__.py"), "r", "utf-8") as f:
+with open(
+    os.path.join(here, "yyds_mdns", "__version__.py"), "r", encoding="utf-8"
+) as f:
     exec(f.read(), about)
 
 try:
@@ -28,6 +29,7 @@ setup(
     license=about.get("__license__", "MIT"),
     license_files=["LICENSE"],
     packages=find_packages(exclude=("tests", "tests.*", "example", "example.*")),
+    package_data={"yyds_mdns": ["py.typed"]},
     include_package_data=True,
     python_requires=">=3.8",
     classifiers=[
@@ -43,6 +45,7 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
     install_requires=[
+        "ifaddr>=0.2.0",
         "zeroconf>=0.131.0",
     ],
     extras_require={

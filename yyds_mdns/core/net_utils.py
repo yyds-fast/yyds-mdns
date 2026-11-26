@@ -5,12 +5,13 @@ Network utilities for intelligent IP and interface resolution.
 """
 
 import hashlib
+import ipaddress
 import os
 import platform
 import re
 import socket
 import uuid
-from typing import List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 try:
     import ifaddr
@@ -19,20 +20,38 @@ except ImportError:
 
 from yyds_mdns.core.exceptions import MDNSNetworkError
 
-# Interface names to ignore (virtual, bridge, docker, VPN, proxy TUNs)
+# Interface names to ignore (virtual, bridge, docker, VPN, proxy TUNs, P2P)
 IGNORED_IFACE_PATTERNS = (
     "lo",
     "loopback",
     "docker",
+    "podman",
     "br-",
+    "bridge",
     "veth",
+    "vethernet",
     "tun",
+    "wintun",
+    "tunnel",
     "tap",
     "utun",
     "wg",
     "wireguard",
+    "openvpn",
+    "ovpn",
     "tailscale",
     "zerotier",
+    "warp",
+    "cloudflarewarp",
+    "nordlynx",
+    "anyconnect",
+    "pangp",
+    "fortissl",
+    "softether",
+    "hamachi",
+    "radmin",
+    "teredo",
+    "isatap",
     "mihomo",
     "clash",
     "sing-box",
@@ -40,24 +59,62 @@ IGNORED_IFACE_PATTERNS = (
     "v2ray",
     "xray",
     "vmnet",
+    "vmware",
     "vboxnet",
+    "virtualbox",
     "virbr",
+    "xenbr",
+    "lxcbr",
+    "lxdbr",
+    "orbstack",
+    "wsl",
+    "hyper-v",
+    "awdl",
+    "llw",
+    "anpi",
     "dummy",
     "cni",
     "flannel",
     "calico",
+    "cali",
+    "geneve",
+    "vxlan",
+    "ovs-system",
+)
+
+# Boundary-aware regex so short tokens like 'lo', 'tun', 'tap', 'wg' never
+# falsely match real physical adapters such as 'wlo1' or 'Local Area Connection',
+# while catching VPN/tunnel/bridge adapters across Linux, macOS, and Windows.
+_IGNORED_IFACE_REGEX = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?:"
+    r"lo\d*|loopback|docker\d*|podman\d*|br-[a-z0-9_.-]*|bridge\d*|"
+    r"veth[a-z0-9_.-]*|vethernet|"
+    r"tun\d*|wintun[a-z0-9_.-]*|tunnel[a-z0-9_.-]*|tap\d*|utun\d*|wg\d*|wireguard|"
+    r"openvpn[a-z0-9_.-]*|ovpn[a-z0-9_.-]*|"
+    r"tailscale\d*|zerotier[a-z0-9_.-]*|"
+    r"warp|cloudflarewarp|nordlynx|anyconnect|pangp[a-z0-9_.-]*|"
+    r"fortissl[a-z0-9_.-]*|softether[a-z0-9_.-]*|hamachi[a-z0-9_.-]*|radmin[a-z0-9_.-]*|"
+    r"teredo|isatap|"
+    r"mihomo|clash|sing-box|singbox|v2ray|xray|"
+    r"vmnet\d*|vmware|vboxnet\d*|virtualbox|"
+    r"virbr\d*|xenbr\d*|lxcbr\d*|lxdbr\d*|orbstack[a-z0-9_.-]*|wsl\d*|hyper-v|"
+    r"awdl\d*|llw\d*|anpi\d*|"
+    r"dummy\d*|cni\d*|flannel[a-z0-9_.-]*|calico[a-z0-9_.-]*|cali[a-z0-9_.-]*|"
+    r"geneve\d*|vxlan\d*|ovs-system"
+    r")"
+    r"(?:$|[^a-z0-9])",
+    re.IGNORECASE,
 )
 
 # Common physical LAN/WiFi interface patterns across Linux/macOS/Windows
 PHYSICAL_IFACE_PATTERNS = (
-    # Linux Ethernet & Wireless
     "eth",
     "en",
-    "wl",  # matches wlan0, wlp2s0, wls1, wlo1, wlx...
+    "wl",
     "wifi",
     "wi-fi",
     "wireless",
-    # Windows adapters (English & Chinese system locales)
     "wlan",
     "local area connection",
     "ethernet",
@@ -66,60 +123,100 @@ PHYSICAL_IFACE_PATTERNS = (
     "802.11",
 )
 
+# Strict prefix regex for OS device names (eno1, en0, enp3s0, enx..., eth0, wlan0, wlp2s0, wlo1, em1)
+# so short prefixes like 'en' or 'eth' never match words like 'OpenVPN', 'Generic', or 'SoftEther'.
+_PHYSICAL_DEV_PREFIX_REGEX = re.compile(
+    r"^(?:eth\d*|en(?:o|p|s|x|\d)[a-z0-9_.-]*|wl(?:an|p|o|s|x|\d)[a-z0-9_.-]*|em\d+)$",
+    re.IGNORECASE,
+)
+
+# Word-boundary descriptive names (Windows / macOS / NetworkManager FriendlyName & Description)
+_PHYSICAL_DESC_REGEX = re.compile(
+    r"(?:^|[^a-z0-9])"
+    r"(?:ethernet|wi-fi|wifi|wireless|wlan|local area connection|802\.11)"
+    r"(?:$|[^a-z0-9])"
+    r"|以太网|无线",
+    re.IGNORECASE,
+)
+
+_WINDOWS_GUID_REGEX = re.compile(r"^\{[0-9a-fA-F-]{36}\}$")
+
 
 def is_valid_ipv4(ip: str) -> bool:
-    """Check if string is a valid IPv4 address."""
+    """Check if string is a strict valid IPv4 address (rejects leading zeros, spaces, non-ASCII)."""
     if not ip or not isinstance(ip, str):
         return False
-    parts = ip.split(".")
-    if len(parts) != 4:
-        return False
     try:
-        return all(0 <= int(part) <= 255 for part in parts)
+        ipaddress.IPv4Address(ip)
+        return True
     except ValueError:
         return False
 
 
 def ip_to_bytes(ip: str) -> bytes:
     """Convert IPv4 string to 4-byte packed representation for mDNS."""
+    if not isinstance(ip, str):
+        raise MDNSNetworkError(f"Invalid IPv4 address '{ip}': expected string")
     try:
-        return socket.inet_aton(ip)
-    except OSError as err:
+        return ipaddress.IPv4Address(ip).packed
+    except ValueError as err:
         raise MDNSNetworkError(f"Invalid IPv4 address '{ip}': {err}") from err
 
 
 def is_ignored_adapter(name: str) -> bool:
-    """Check if adapter name matches virtual/docker/proxy blacklist."""
-    name_low = name.lower()
-    return any(p in name_low for p in IGNORED_IFACE_PATTERNS)
+    """Check if adapter name matches virtual/docker/proxy/VPN blacklist."""
+    if not name:
+        return False
+    return bool(_IGNORED_IFACE_REGEX.search(name))
 
 
 def is_ignored_ip(ip: str) -> bool:
-    """Check if IP is loopback, link-local, or proxy TUN fake-ip."""
+    """Check if IP is unspecified, loopback, link-local, multicast, broadcast, or proxy TUN fake-ip."""
     if not is_valid_ipv4(ip):
         return True
+    addr = ipaddress.IPv4Address(ip)
+    if (
+        addr.is_unspecified
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or ip == "255.255.255.255"
+    ):
+        return True
     return (
-        ip.startswith("127.")
-        or ip.startswith("169.254.")
+        ip.startswith("0.")
         or ip.startswith("198.18.")  # RFC 2544 / Clash & Mihomo TUN Fake-IP
         or ip.startswith("198.19.")
     )
 
 
-def score_adapter_ip(adapter_name: str, ip: str) -> int:
+def _has_physical_pattern(name: str) -> bool:
+    stripped = name.strip()
+    if not stripped or _WINDOWS_GUID_REGEX.match(stripped):
+        return False
+    if _PHYSICAL_DEV_PREFIX_REGEX.match(stripped):
+        return True
+    return bool(_PHYSICAL_DESC_REGEX.search(stripped))
+
+
+def score_adapter_ip(
+    adapter_name: str,
+    ip: str,
+    extra_names: Optional[Iterable[str]] = None,
+) -> int:
     """
     Score adapter + IP combination.
-    Prioritizes real physical LAN network cards (e.g. eno1, eth0, wlan0)
+    Prioritizes real physical LAN network cards (e.g. eno1, eth0, wlan0, wlo1, WLAN, 以太网)
     and RFC 1918 private IPs (192.168.x.x, 10.x.x.x).
     """
     if is_ignored_ip(ip):
         return -1000
 
-    if is_ignored_adapter(adapter_name):
+    all_names = [n for n in [adapter_name, *(extra_names or ())] if n]
+    if any(is_ignored_adapter(n) for n in all_names):
         return -500
 
     score = 0
-    name_low = adapter_name.lower()
 
     # IP ranges: RFC 1918 Class C highest priority for LAN
     if ip.startswith("192.168."):
@@ -136,26 +233,53 @@ def score_adapter_ip(adapter_name: str, ip: str) -> int:
     else:
         score += 200
 
-    # Physical interface bonus (eno1, eth0, wlan0, wlp2s0, Wi-Fi, WLAN, 无线网络连接, etc.)
-    if any(p in name_low for p in PHYSICAL_IFACE_PATTERNS):
+    # Physical interface bonus (eno1, eth0, wlan0, wlp2s0, wlo1, Wi-Fi, WLAN, 无线网络连接, etc.)
+    if any(_has_physical_pattern(n) for n in all_names):
         score += 500
 
     return score
 
 
+def _extract_adapter_labels(adapter: Any, ip_obj: Any) -> Tuple[str, List[str]]:
+    """
+    Extract human-friendly display name and all candidate names for an ifaddr adapter/IP.
+    On Windows, `adapter.name` is a GUID while `ip_obj.nice_name` holds FriendlyName (e.g. 'WLAN')
+    and `adapter.nice_name` holds hardware Description (e.g. 'Intel(R) Wi-Fi 6...').
+    """
+    raw_name = getattr(adapter, "name", "") or ""
+    adapter_nice = getattr(adapter, "nice_name", "") or ""
+    ip_nice = getattr(ip_obj, "nice_name", "") or ""
+
+    if _WINDOWS_GUID_REGEX.match(raw_name):
+        display_name = ip_nice or adapter_nice or raw_name
+    else:
+        display_name = raw_name or ip_nice or adapter_nice
+
+    all_names: List[str] = []
+    for n in (raw_name, ip_nice, adapter_nice):
+        if n and n not in all_names:
+            all_names.append(n)
+    return display_name, all_names
+
+
 def get_adapter_candidates() -> List[Tuple[int, str, str]]:
     """
     Enumerate all network adapters and IPv4 addresses, scored and sorted.
-    Returns list of (score, adapter_name, ip).
+    Returns list of (score, adapter_display_name, ip).
     """
-    candidates = []
+    candidates: List[Tuple[int, str, str]] = []
     if ifaddr is not None:
         try:
             for adapter in ifaddr.get_adapters():
                 for ip_obj in adapter.ips:
                     if isinstance(ip_obj.ip, str) and is_valid_ipv4(ip_obj.ip):
-                        score = score_adapter_ip(adapter.name, ip_obj.ip)
-                        candidates.append((score, adapter.name, ip_obj.ip))
+                        display_name, all_names = _extract_adapter_labels(
+                            adapter, ip_obj
+                        )
+                        score = score_adapter_ip(
+                            display_name, ip_obj.ip, extra_names=all_names
+                        )
+                        candidates.append((score, display_name, ip_obj.ip))
         except Exception:
             pass
 
@@ -163,13 +287,29 @@ def get_adapter_candidates() -> List[Tuple[int, str, str]]:
     return candidates
 
 
+def get_local_interface_ips(include_loopback: bool = True) -> List[str]:
+    """Return all valid IPv4 addresses currently assigned to local OS interfaces."""
+    ips: List[str] = []
+    if ifaddr is not None:
+        try:
+            for adapter in ifaddr.get_adapters():
+                for ip_obj in adapter.ips:
+                    if isinstance(ip_obj.ip, str) and is_valid_ipv4(ip_obj.ip):
+                        if not include_loopback and ip_obj.ip.startswith("127."):
+                            continue
+                        if ip_obj.ip not in ips:
+                            ips.append(ip_obj.ip)
+        except Exception:
+            pass
+    return ips
+
+
 def get_all_local_ips() -> List[str]:
     """Retrieve all distinct non-ignored IPv4 addresses associated with local host."""
     candidates = get_adapter_candidates()
-    ips = [c[2] for c in candidates if c[0] > 0]
+    ips = list(dict.fromkeys(c[2] for c in candidates if c[0] > 0))
     if not ips:
-        # Fallback to all detected if none scored > 0
-        ips = [c[2] for c in candidates if not is_ignored_ip(c[2])]
+        ips = list(dict.fromkeys(c[2] for c in candidates if not is_ignored_ip(c[2])))
     return ips if ips else ["127.0.0.1"]
 
 
@@ -181,27 +321,29 @@ def get_lan_ip(
     """
     Intelligently determine the real LAN IPv4 address.
 
-    1. If `preferred_ip` is specified, validates and returns it.
-    2. If `interface` is specified, finds matching adapter's IPv4.
+    1. If `preferred_ip` is specified (and not '0.0.0.0'), validates and returns it.
+    2. If `interface` is specified, matches adapter name / FriendlyName / Description.
     3. Scans all physical/virtual adapters, strictly filtering out
-       Docker bridges, loopbacks, and proxy TUN devices (e.g. Mihomo/Clash).
+       Docker bridges, loopbacks, VPNs, and proxy TUN devices (e.g. Mihomo/Clash).
     4. Probes OS routing table via dummy UDP socket connection as fallback.
     5. Falls back to 127.0.0.1 if nothing else is available.
     """
-    # 1. Explicit preferred IP
-    if preferred_ip:
+    # 1. Explicit preferred IP (treat 0.0.0.0 as auto-detect)
+    if preferred_ip and preferred_ip != "0.0.0.0":
         if not is_valid_ipv4(preferred_ip):
             raise MDNSNetworkError(
                 f"Provided preferred_ip '{preferred_ip}' is not valid IPv4."
             )
         return preferred_ip
 
-    # 2. Explicit interface
+    # 2. Explicit interface (supports Linux/macOS name as well as Windows FriendlyName/Description/GUID)
     if interface and ifaddr is not None:
+        target_low = interface.strip().lower()
         for adapter in ifaddr.get_adapters():
-            if adapter.name.lower() == interface.lower():
-                for ip_obj in adapter.ips:
-                    if isinstance(ip_obj.ip, str) and is_valid_ipv4(ip_obj.ip):
+            for ip_obj in adapter.ips:
+                if isinstance(ip_obj.ip, str) and is_valid_ipv4(ip_obj.ip):
+                    _, all_names = _extract_adapter_labels(adapter, ip_obj)
+                    if any(n.lower() == target_low for n in all_names):
                         return ip_obj.ip
         raise MDNSNetworkError(f"Interface '{interface}' not found or has no IPv4.")
 
@@ -215,10 +357,9 @@ def get_lan_ip(
     targets = [target_probe, "1.1.1.1", "192.168.1.1", "10.0.0.1"]
     for target in targets:
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((target, 80))
-            probed_ip = s.getsockname()[0]
-            s.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((target, 80))
+                probed_ip = s.getsockname()[0]
             if is_valid_ipv4(probed_ip) and not is_ignored_ip(probed_ip):
                 return probed_ip
         except Exception:
@@ -235,7 +376,10 @@ def get_lan_ip(
 def _read_linux_interface_mac(interface: str) -> Optional[str]:
     """Read physical MAC address directly from Linux sysfs."""
     try:
-        path = f"/sys/class/net/{interface}/address"
+        safe_iface = os.path.basename(interface.strip())
+        if not safe_iface or safe_iface in (".", ".."):
+            return None
+        path = f"/sys/class/net/{safe_iface}/address"
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 mac = f.read().strip().replace(":", "").replace("-", "").lower()
@@ -246,8 +390,8 @@ def _read_linux_interface_mac(interface: str) -> Optional[str]:
     return None
 
 
-def _get_system_machine_id() -> str:
-    """Retrieve platform-specific stable machine identifier as fallback."""
+def _get_system_machine_id() -> Optional[str]:
+    """Retrieve platform-specific persistent hardware/OS machine identifier."""
     system = platform.system()
     try:
         if system == "Linux":
@@ -266,12 +410,15 @@ def _get_system_machine_id() -> str:
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
                 text=True,
                 errors="ignore",
+                timeout=2,
             )
             for line in out.splitlines():
                 if "IOPlatformUUID" in line:
                     parts = line.split("=")
                     if len(parts) > 1:
-                        return parts[-1].replace('"', "").strip()
+                        val = parts[-1].replace('"', "").strip()
+                        if val:
+                            return val
         elif system == "Windows":
             import winreg
 
@@ -284,7 +431,15 @@ def _get_system_machine_id() -> str:
                     return str(val).strip()
     except Exception:
         pass
-    return f"{platform.node()}-{platform.machine()}"
+    return None
+
+
+def _md5_hex(data: bytes) -> str:
+    """FIPS-safe MD5 hex digest for non-cryptographic hardware ID hashing."""
+    try:
+        return hashlib.md5(data, usedforsecurity=False).hexdigest()
+    except TypeError:
+        return hashlib.md5(data).hexdigest()
 
 
 def get_mac_suffix(length: int = 4, interface: Optional[str] = None) -> str:
@@ -292,10 +447,15 @@ def get_mac_suffix(length: int = 4, interface: Optional[str] = None) -> str:
     Return a stable, deterministic hexadecimal hardware suffix of the local machine.
 
     1. If `interface` is given (or Linux primary physical adapter exists), attempts to read its MAC.
-    2. Fallback to `uuid.getnode()`.
-    3. If `uuid.getnode()` returned a random address (multicast bit set) or 0, fallback to system machine-id hash.
+    2. Fallback to `uuid.getnode()` if it returns a globally unique burned-in IEEE MAC
+       (neither multicast/random bit 0x01 nor locally-administered virtual/randomized bit 0x02).
+    3. Fallback to persistent OS machine ID hash (/etc/machine-id, IOPlatformUUID, MachineGuid),
+       or locally-administered MAC if no persistent OS machine ID is available.
     4. Slices the last `length` characters in lowercase.
     """
+    if isinstance(length, bool) or length <= 0:
+        raise ValueError(f"suffix length must be positive, got {length}")
+
     mac_hex: Optional[str] = None
 
     # 1. Try reading directly from Linux sysfs if interface specified or primary interface available
@@ -303,28 +463,39 @@ def get_mac_suffix(length: int = 4, interface: Optional[str] = None) -> str:
         mac_hex = _read_linux_interface_mac(interface)
 
     if not mac_hex:
-        # Check primary candidate adapter from get_adapter_candidates()
         candidates = get_adapter_candidates()
         valid = [c for c in candidates if c[0] > 0]
         if valid:
             primary_adapter_name = valid[0][1]
             mac_hex = _read_linux_interface_mac(primary_adapter_name)
 
-    # 2. uuid.getnode()
+    # 2. uuid.getnode() — distinguish burned-in universal MAC vs locally-administered virtual MAC
+    local_admin_mac: Optional[str] = None
     if not mac_hex:
         try:
             node = uuid.getnode()
-            is_random_mac = bool((node >> 40) & 0x01)
+            first_octet = (node >> 40) & 0xFF
+            is_multicast_random = bool(first_octet & 0x01)
+            is_locally_administered = bool(first_octet & 0x02)
             formatted = f"{node:012x}"
-            if not is_random_mac and formatted != "000000000000":
-                mac_hex = formatted
+            if not is_multicast_random and formatted != "000000000000":
+                if not is_locally_administered:
+                    mac_hex = formatted
+                else:
+                    local_admin_mac = formatted
         except Exception:
             pass
 
-    # 3. Fallback to system machine ID hash
+    # 3. Persistent OS machine ID hash (stable across WSL2/Docker/macOS virtual MAC regeneration)
     if not mac_hex:
         machine_id = _get_system_machine_id()
-        mac_hex = hashlib.md5(machine_id.encode("utf-8")).hexdigest()
+        if machine_id:
+            mac_hex = _md5_hex(machine_id.encode("utf-8"))
+        elif local_admin_mac:
+            mac_hex = local_admin_mac
+        else:
+            fallback_id = f"{platform.node()}-{platform.machine()}"
+            mac_hex = _md5_hex(fallback_id.encode("utf-8"))
 
     clean_hex = re.sub(r"[^0-9a-fA-F]", "", mac_hex).lower()
     if len(clean_hex) < length:

@@ -6,7 +6,8 @@ Universal standalone controller, context manager (sync & async), and decorator f
 
 import asyncio
 import functools
-from typing import Any, Callable, Dict, Optional
+import threading
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from yyds_mdns.core.engine import AsyncMDNSEngine, MDNSEngine
 from yyds_mdns.core.service import MDNSServiceConfig
@@ -14,7 +15,7 @@ from yyds_mdns.core.service import MDNSServiceConfig
 
 class MDNSServer:
     """
-    Universal mDNS controller.
+    Universal thread-safe & coroutine-safe mDNS controller.
     Supports:
     1. Synchronous context manager: with MDNSServer(...):
     2. Asynchronous context manager: async with MDNSServer(...):
@@ -31,13 +32,19 @@ class MDNSServer:
         protocol: str = "_http._tcp.local.",
         properties: Optional[Dict[str, Any]] = None,
         server: Optional[str] = None,
-        use_worker_lock: bool = False,
+        use_worker_lock: bool = True,
         verbose: bool = True,
         unique: bool = False,
         suffix_length: int = 4,
+        allow_name_change: bool = False,
+        strict: bool = True,
+        watch_interval: float = 0.0,
         **kwargs: Any,
     ):
         self.verbose = verbose
+        self.allow_name_change = allow_name_change
+        self.strict = strict
+        self.watch_interval = watch_interval
         self.config = MDNSServiceConfig(
             name=name,
             port=port,
@@ -51,13 +58,35 @@ class MDNSServer:
             **kwargs,
         )
         self.use_worker_lock = use_worker_lock
-        self.engine = MDNSEngine(
-            config=self.config,
-            use_worker_lock=use_worker_lock,
-            auto_atexit=True,
-            verbose=verbose,
-        )
+        self._sync_engine: Optional[MDNSEngine] = None
         self._async_engine: Optional[AsyncMDNSEngine] = None
+        self._sync_lock = threading.RLock()
+        self._async_loop_lock: Optional[
+            Tuple[asyncio.AbstractEventLoop, asyncio.Lock]
+        ] = None
+        self._sync_refs = 0
+        self._async_refs = 0
+
+    def _get_async_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._async_loop_lock is None or self._async_loop_lock[0] is not loop:
+            self._async_loop_lock = (loop, asyncio.Lock())
+        return self._async_loop_lock[1]
+
+    @property
+    def engine(self) -> MDNSEngine:
+        """Lazily instantiated synchronous engine."""
+        if self._sync_engine is None:
+            self._sync_engine = MDNSEngine(
+                config=self.config,
+                use_worker_lock=self.use_worker_lock,
+                auto_atexit=True,
+                verbose=self.verbose,
+                allow_name_change=self.allow_name_change,
+                strict=self.strict,
+                watch_interval=self.watch_interval,
+            )
+        return self._sync_engine
 
     @property
     def url(self) -> str:
@@ -83,7 +112,9 @@ class MDNSServer:
     def is_registered(self) -> bool:
         if self._async_engine is not None and self._async_engine.is_registered:
             return True
-        return self.engine.is_registered
+        if self._sync_engine is not None and self._sync_engine.is_registered:
+            return True
+        return False
 
     def start(self) -> bool:
         """Start mDNS broadcast synchronously."""
@@ -91,7 +122,14 @@ class MDNSServer:
 
     def stop(self) -> None:
         """Stop mDNS broadcast synchronously."""
-        self.engine.stop()
+        if self._sync_engine is not None:
+            self._sync_engine.stop()
+
+    def refresh(self) -> bool:
+        """Dynamically re-probe LAN IP and update synchronous mDNS record if changed."""
+        if self._sync_engine is not None:
+            return self._sync_engine.refresh()
+        return False
 
     async def async_start(self) -> bool:
         """Start mDNS broadcast asynchronously."""
@@ -101,6 +139,9 @@ class MDNSServer:
                 use_worker_lock=self.use_worker_lock,
                 auto_atexit=True,
                 verbose=self.verbose,
+                allow_name_change=self.allow_name_change,
+                strict=self.strict,
+                watch_interval=self.watch_interval,
             )
         return await self._async_engine.start()
 
@@ -109,21 +150,41 @@ class MDNSServer:
         if self._async_engine is not None:
             await self._async_engine.stop()
 
-    # Synchronous Context Manager
-    def __enter__(self):
-        self.start()
-        return self
+    async def async_refresh(self) -> bool:
+        """Dynamically re-probe LAN IP and update asynchronous mDNS record if changed."""
+        if self._async_engine is not None:
+            return await self._async_engine.refresh()
+        return False
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
+    # Synchronous Context Manager (thread-safe & re-entrant)
+    def __enter__(self) -> "MDNSServer":
+        with self._sync_lock:
+            if self._sync_refs == 0:
+                self.start()
+            self._sync_refs += 1
+            return self
 
-    # Asynchronous Context Manager
-    async def __aenter__(self):
-        await self.async_start()
-        return self
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        with self._sync_lock:
+            if self._sync_refs > 0:
+                self._sync_refs -= 1
+            if self._sync_refs == 0:
+                self.stop()
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.async_stop()
+    # Asynchronous Context Manager (coroutine-safe & concurrent-decorator safe)
+    async def __aenter__(self) -> "MDNSServer":
+        async with self._get_async_lock():
+            if self._async_refs == 0:
+                await self.async_start()
+            self._async_refs += 1
+            return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        async with self._get_async_lock():
+            if self._async_refs > 0:
+                self._async_refs -= 1
+            if self._async_refs == 0:
+                await self.async_stop()
 
     # Decorator support for functions and coroutines
     def __call__(self, func: Callable[..., Any]) -> Callable[..., Any]:
@@ -150,9 +211,9 @@ class AsyncMDNSServer(MDNSServer):
     Dedicated asynchronous mDNS server alias for backwards compatibility.
     """
 
-    async def __aenter__(self):
-        await self.async_start()
+    async def __aenter__(self) -> "AsyncMDNSServer":
+        await super().__aenter__()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.async_stop()
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await super().__aexit__(exc_type, exc_val, exc_tb)
