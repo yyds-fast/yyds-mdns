@@ -208,6 +208,16 @@ class TestResolver(unittest.TestCase):
                 "_https._tcp.local.", "secure-api._https._tcp.local.", timeout=200
             )
 
+        # Simulate Python 3.8 zeroconf <= 0.132.x where AddressResolverIPv4 is None
+        with patch("yyds_mdns.core.resolver.AddressResolverIPv4", None), patch(
+            "yyds_mdns.core.resolver._create_zeroconf", return_value=mock_zc
+        ):
+            res_py38 = MDNSResolver.resolve(
+                "secure-api", service_type="https", timeout=0.2
+            )
+            self.assertIsNotNone(res_py38)
+            self.assertEqual(res_py38["port"], 8443)
+
 
 if __name__ == "__main__":
     unittest.main()

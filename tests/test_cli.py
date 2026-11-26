@@ -200,7 +200,14 @@ class TestCLI(unittest.TestCase):
 
         def trigger_sigterm_soon():
             time.sleep(0.05)
-            os.kill(os.getpid(), signal.SIGTERM)
+            if os.name == "nt":
+                # On Windows, os.kill(..., SIGTERM) calls Win32 TerminateProcess().
+                # Invoke the registered SIGTERM handler in-process instead.
+                handler = signal.getsignal(signal.SIGTERM)
+                if callable(handler):
+                    handler(signal.SIGTERM, None)
+            else:
+                os.kill(os.getpid(), signal.SIGTERM)
 
         with patch("yyds_mdns.cli.MDNSEngine", return_value=mock_engine), patch(
             "sys.stdout", buf

@@ -14,13 +14,18 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 from zeroconf import (
-    AddressResolverIPv4,
     IPVersion,
     ServiceBrowser,
     ServiceInfo,
     Zeroconf,
 )
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+try:
+    from zeroconf import AddressResolverIPv4
+except ImportError:
+    # Python 3.8 uses zeroconf <= 0.132.x which predates AddressResolverIPv4
+    AddressResolverIPv4 = None  # type: ignore[misc, assignment]
 
 from yyds_mdns.core.engine import _create_async_zeroconf, _create_zeroconf
 from yyds_mdns.core.exceptions import MDNSResolutionTimeoutError, YYDSMDNSError
@@ -178,7 +183,7 @@ def _resolve_host_ipv4_sync(
     zc: Zeroconf, host_prefix: str, timeout_ms: int
 ) -> Optional[Dict[str, Any]]:
     """Fallback mDNS A-record resolution for pure .local hosts (e.g. raspberrypi.local)."""
-    if not isinstance(zc, Zeroconf):
+    if AddressResolverIPv4 is None or not isinstance(zc, Zeroconf):
         return None
     host_fqdn = f"{host_prefix}.local."
     try:
@@ -200,7 +205,7 @@ async def _resolve_host_ipv4_async(
     zc: Zeroconf, host_prefix: str, timeout_ms: int
 ) -> Optional[Dict[str, Any]]:
     """Async fallback mDNS A-record resolution for pure .local hosts."""
-    if not isinstance(zc, Zeroconf):
+    if AddressResolverIPv4 is None or not isinstance(zc, Zeroconf):
         return None
     host_fqdn = f"{host_prefix}.local."
     try:
@@ -411,6 +416,7 @@ class MDNSResolver:
 
             if (
                 fallback_host_lookup
+                and AddressResolverIPv4 is not None
                 and isinstance(zc, Zeroconf)
                 and getattr(zc, "loop", None) is not None
             ):
@@ -519,7 +525,11 @@ class MDNSResolver:
                 if info.load_from_cache(azc.zeroconf) and info.parsed_addresses():
                     return _format_service_info(info)
 
-            if fallback_host_lookup and isinstance(azc.zeroconf, Zeroconf):
+            if (
+                fallback_host_lookup
+                and AddressResolverIPv4 is not None
+                and isinstance(azc.zeroconf, Zeroconf)
+            ):
                 svc_ok, host_res = await asyncio.gather(
                     info.async_request(azc.zeroconf, timeout=timeout_ms),
                     _resolve_host_ipv4_async(azc.zeroconf, host_prefix, timeout_ms),

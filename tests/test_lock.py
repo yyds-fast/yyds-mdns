@@ -16,8 +16,10 @@ class TestWorkerLock(unittest.TestCase):
             acquired1 = lock1.acquire()
             self.assertTrue(acquired1)
 
-            with open(lock1.lock_file_path, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read().strip(), str(os.getpid()))
+            if os.name != "nt":
+                # On Windows, msvcrt.locking is mandatory and blocks reads from a second handle
+                with open(lock1.lock_file_path, "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read().strip(), str(os.getpid()))
 
             # Second lock with same key in another instance should fail
             acquired2 = lock2.acquire()
@@ -37,6 +39,7 @@ class TestWorkerLock(unittest.TestCase):
         with WorkerLock("test_context_key") as acquired:
             self.assertTrue(acquired)
 
+    @unittest.skipIf(os.name == "nt", "POSIX fork semantics only")
     def test_forked_child_does_not_unlock_parent_flock(self):
         lock1 = WorkerLock("test_fork_safety_key")
         lock2 = WorkerLock("test_fork_safety_key")
@@ -60,6 +63,7 @@ class TestWorkerLock(unittest.TestCase):
             lock1.release()
             lock2.release()
 
+    @unittest.skipIf(os.name == "nt", "POSIX fork semantics only")
     def test_forked_child_acquire_closes_inherited_fd_no_leak(self):
         parent_lock = WorkerLock("test_fork_acquire_key")
         other_lock = WorkerLock("test_fork_acquire_key")

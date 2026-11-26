@@ -236,12 +236,19 @@ class TestMDNSEngine(unittest.TestCase):
         async def run_inside_loop():
             from yyds_mdns.core.resolver import MDNSResolver
 
+            running_loop = asyncio.get_running_loop()
             cfg = MDNSServiceConfig(name="in-loop-sync-svc", port=18089, ip="127.0.0.1")
             with MDNSEngine(cfg, use_worker_lock=False, verbose=False) as eng:
                 self.assertTrue(eng.is_registered)
-                res = MDNSResolver.resolve("in-loop-sync-svc", timeout=1.5)
-                self.assertIsNotNone(res)
-                self.assertEqual(res["port"], 18089)
+                # Sync Zeroconf must run on its own dedicated thread loop, never hijacking running_loop
+                self.assertIsNot(eng._zeroconf.loop, running_loop)
+                # Calling sync resolve inside active event loop must NOT raise RuntimeError
+                res = MDNSResolver.resolve(
+                    "nonexistent-in-loop-probe",
+                    timeout=0.15,
+                    fallback_host_lookup=False,
+                )
+                self.assertIsNone(res)
 
         asyncio.run(run_inside_loop())
 

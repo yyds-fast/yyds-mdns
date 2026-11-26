@@ -128,7 +128,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     try:
         while not stop_event.is_set():
-            stop_event.wait(timeout=3600)
+            stop_event.wait(timeout=0.5)
     except KeyboardInterrupt:
         pass
     finally:

@@ -145,7 +145,7 @@ def _infer_from_argv() -> str:
         for arg in sys.argv[1:]:
             if arg.startswith("-"):
                 continue
-            if ":" in arg and os.path.sep not in arg:
+            if ":" in arg and "/" not in arg and "\\" not in arg:
                 mod_part = arg.split(":", 1)[0].split(".")[-1]
                 candidate = _sanitize_dns_label(mod_part)
                 if candidate and candidate not in _CLI_RUNNER_NAMES:

@@ -315,7 +315,9 @@ class MDNSEngine:
                     new_info
                 ):
                     new_info.server = self.config.server
-                    new_zc.update_service(new_info)
+                    sync_update = getattr(new_zc, "update_service", None)
+                    if callable(sync_update):
+                        sync_update(new_info)
 
                 self._zeroconf = new_zc
                 self._service_info = new_info
@@ -374,7 +376,9 @@ class MDNSEngine:
                     self._service_info
                 ):
                     self._service_info.server = self.config.server
-                    self._zeroconf.update_service(self._service_info)
+                    sync_update = getattr(self._zeroconf, "update_service", None)
+                    if callable(sync_update):
+                        sync_update(self._service_info)
 
                 self._is_registered = True
                 logger.info(
